@@ -1,5 +1,9 @@
-use std::collections::HashMap;
-use std::hash::Hash;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt::Display;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 
 /// KnowledgeGraph stores a sparse graph in an edge list format. For now, the
 /// graph will be undirected and uncolored - these features will be added later.
@@ -10,17 +14,17 @@ use std::hash::Hash;
 /// where each item is a tuple `(usize, usize)`, where the first item is the ID
 /// of the vertex at one end of the edge, and the second item is the ID of the
 /// other vertex.
-pub struct KnowledgeGraph<V: Hash + Eq> {
+pub struct KnowledgeGraph<V: Ord> {
     edges: Vec<(usize, usize)>,
-    vertex_mapping: HashMap<V, usize>
+    vertex_mapping: BTreeMap<V, usize>
 }
 
-impl<V: Hash + Eq> KnowledgeGraph<V> {
+impl<V: Ord> KnowledgeGraph<V> {
     /// Create a new, empty `KnowledgeGraph`.
     pub fn new() -> Self {
         Self {
             edges: Vec::new(),
-            vertex_mapping: HashMap::new()
+            vertex_mapping: BTreeMap::new()
         }
     }
 
@@ -52,7 +56,7 @@ impl<V: Hash + Eq> KnowledgeGraph<V> {
     /// Remaps the internal vertex IDs. The input slice `new_mapping` will have
     /// one entry per vertex. Each entry's index will correspond to the vertex's
     /// old ID, while the entry itself will correspond to the new ID.
-    fn remap_vertices(&mut self, new_mapping: &[usize]) {
+    pub fn remap_vertices(&mut self, new_mapping: &[usize]) {
         for old_id in self.vertex_mapping.values_mut() {
             let new_id = new_mapping[*old_id];
             *old_id = new_id;
@@ -67,7 +71,36 @@ impl<V: Hash + Eq> KnowledgeGraph<V> {
     }
 }
 
-impl<V: Hash + Eq> FromIterator<(V, V)> for KnowledgeGraph<V> {
+impl<V: Display + Ord> KnowledgeGraph<V> {
+    /// Write the graph as a dot file to the given path.
+    pub fn write_to_dot_file<P>(&self, path: P) -> Result<(), Box<dyn Error>> 
+    where 
+        P: AsRef<Path>
+    {
+        let mut file = File::create(path)?;
+
+        // Write file header
+        file.write(b"graph {\n")?;
+
+        // Write vertex labels, ensuring they are sorted by ID
+        for (v, id) in &self.vertex_mapping {
+            file.write_fmt(format_args!("\t{} [label=\"{} ({})\"]\n", id, v, id))?;
+        }
+        file.write(b"\n")?;
+
+        // Write graph edges
+        for (v1, v2) in &self.edges {
+            file.write_fmt(format_args!("\t{} -- {}\n", v1, v2))?;
+        }
+
+        // Write file footer
+        file.write(b"}")?;
+
+        Ok(())
+    }
+}
+
+impl<V: Ord> FromIterator<(V, V)> for KnowledgeGraph<V> {
     /// Constructs a `KnowledgeGraph<V>` from an iterator of tuples representing
     /// edges in the form `(V, V)`, where the first `V` represents the source 
     /// vertex of the edge, and the second represents the destination.
@@ -99,7 +132,10 @@ impl<V: Hash + Eq> FromIterator<(V, V)> for KnowledgeGraph<V> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::KnowledgeGraph;
+    use tempfile::tempdir;
 
     #[test]
     fn empty_graph() {
@@ -176,5 +212,24 @@ mod tests {
         assert_eq!(g.vertex_mapping.len(), 3);
         assert_eq!(g.edges[0], (1, 2));
         assert_eq!(g.edges[1], (1, 0));
+    }
+
+    #[test]
+    fn dot_file_writing() {
+        let g: KnowledgeGraph<_> = [
+            ("v1", "v2"),
+            ("v1", "v3")
+        ].into_iter().collect();
+
+        // Write graph to temporary dot file
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().join("test.dot");
+        g.write_to_dot_file(&temp_path).unwrap();
+
+        // Read the temporary dot file and make sure it is correct
+        let temp_contents = fs::read_to_string(temp_path).unwrap();
+        let corr_contents = fs::read_to_string("tests/goldens/test.dot").unwrap();
+
+        assert_eq!(temp_contents, corr_contents);
     }
 }
