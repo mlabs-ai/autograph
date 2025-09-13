@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 /// KnowledgeGraph stores a sparse graph in an edge list format. For now, the
-/// graph will be undirected and uncolored - these features will be added later.
+/// graph will be undirected and uncolored -- these features will be added later.
 /// 
 /// Vertices can be represented by anything hashable (e.g., a `String`), but in
 /// the internal edge representations, they will be stored as `usize` integer
@@ -14,6 +14,7 @@ use std::path::Path;
 /// where each item is a tuple `(usize, usize)`, where the first item is the ID
 /// of the vertex at one end of the edge, and the second item is the ID of the
 /// other vertex.
+#[derive(PartialEq, Eq, Debug)]
 pub struct KnowledgeGraph<V: Ord> {
     edges: Vec<(usize, usize)>,
     vertex_mapping: BTreeMap<V, usize>
@@ -63,40 +64,72 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
 
         for (old_src, old_dst) in self.edges.iter_mut() {
-            let new_src = new_mapping[*old_src];
-            let new_dst = new_mapping[*old_dst];
-            *old_src = new_src;
-            *old_dst = new_dst;
+            *old_src = new_mapping[*old_src];
+            *old_dst = new_mapping[*old_dst];
         }
     }
-}
 
-impl<V: Display + Ord> KnowledgeGraph<V> {
     /// Write the graph as a dot file to the given path.
     pub fn write_to_dot_file<P>(&self, path: P) -> Result<(), Box<dyn Error>> 
     where 
-        P: AsRef<Path>
+        P: AsRef<Path>,
+        V: Display
     {
         let mut file = File::create(path)?;
 
         // Write file header
-        file.write(b"graph {\n")?;
+        file.write_all(b"graph {\n")?;
 
         // Write vertex labels, ensuring they are sorted by ID
+        let mut id_to_vertex_mapping = BTreeMap::new();
         for (v, id) in &self.vertex_mapping {
-            file.write_fmt(format_args!("\t{} [label=\"{} ({})\"]\n", id, v, id))?;
+            file.write_fmt(format_args!("\t{} [label=\"{} ({})\"]\n", v, v, id))?;
+            id_to_vertex_mapping.insert(*id, v);
         }
-        file.write(b"\n")?;
+        file.write_all(b"\n")?;
 
         // Write graph edges
-        for (v1, v2) in &self.edges {
+        for (id1, id2) in &self.edges {
+            let v1 = id_to_vertex_mapping
+                .get(id1)
+                .ok_or("Graph contained an edge with an unindexed vertex")?;
+            let v2 = id_to_vertex_mapping
+                .get(id2)
+                .ok_or("Graph contained an edge with an unindexed vertex")?;
             file.write_fmt(format_args!("\t{} -- {}\n", v1, v2))?;
         }
 
         // Write file footer
-        file.write(b"}")?;
+        file.write_all(b"}")?;
 
         Ok(())
+    }
+}
+
+impl KnowledgeGraph<String> {
+    /// Read the graph from the given dot file.
+    pub fn from_dot_file<P>(path: P) -> Result<Self, Box<dyn Error>> 
+    where 
+        P: AsRef<Path>
+    {
+        // Read and parse graph
+        let ast_graph = dot_parser::ast::Graph::from_file(path)?;
+        let can_graph = dot_parser::canonical::Graph::from(ast_graph);
+
+        // Sort the vertices for determinism's sake
+        let mut vs: Vec<_> = can_graph.nodes.set.keys().collect();
+        vs.sort();
+
+        // Convert the graph to this format
+        let mut g = Self::new();
+        for v in vs {
+            g.add_vertex(v.to_string());
+        }
+        for e in can_graph.edges.set {
+            g.add_edge(e.from, e.to);
+        }
+
+        Ok(g)
     }
 }
 
@@ -231,5 +264,16 @@ mod tests {
         let corr_contents = fs::read_to_string("tests/goldens/test.dot").unwrap();
 
         assert_eq!(temp_contents, corr_contents);
+    }
+
+    #[test]
+    fn dot_file_reading() {
+        let g1: KnowledgeGraph<String> = [
+            ("v1".to_string(), "v2".to_string()),
+            ("v1".to_string(), "v3".to_string())
+        ].into_iter().collect();
+        let g2 = KnowledgeGraph::from_dot_file("tests/goldens/test.dot").unwrap();
+
+        assert_eq!(g1, g2);
     }
 }
