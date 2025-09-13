@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
+use rand::seq::index::sample;
+
 /// KnowledgeGraph stores a sparse graph in an edge list format. For now, the
 /// graph will be undirected and uncolored -- these features will be added later.
 /// 
@@ -69,22 +71,37 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
     }
 
+    /// Applies a random ordering to the internal vertex IDs. While this does
+    /// not meaningfully alter the actual structure of the graph, it does
+    /// effectively ensure that the graph is unclustered for the purposes of
+    /// the clustering algorithm of this project.
+    pub fn shuffle_vertex_ids(&mut self) {
+        let num_verts = self.vertex_mapping.len();
+
+        let mut rng = rand::rng();
+        let new_mapping = sample(&mut rng, num_verts, num_verts).into_vec();
+
+        self.remap_vertices(&new_mapping);
+    }
+
     /// Write the graph as a dot file to the given path.
     pub fn write_to_dot_file<P>(&self, path: P) -> Result<(), Box<dyn Error>> 
     where 
         P: AsRef<Path>,
         V: Display
     {
-        let mut file = File::create(path)?;
+        // Ensure vertices are written in order of IDs
+        let id_to_vertex_mapping: BTreeMap<_, _> = self.vertex_mapping.iter()
+            .map(|(v, &id)| (id, v))
+            .collect();
 
-        // Write file header
+        // Open file and write file header
+        let mut file = File::create(path)?;
         file.write_all(b"graph {\n")?;
 
         // Write vertex labels, ensuring they are sorted by ID
-        let mut id_to_vertex_mapping = BTreeMap::new();
-        for (v, id) in &self.vertex_mapping {
+        for (id, v) in &id_to_vertex_mapping {
             file.write_fmt(format_args!("\t{} [label=\"{} ({})\"]\n", v, v, id))?;
-            id_to_vertex_mapping.insert(*id, v);
         }
         file.write_all(b"\n")?;
 
