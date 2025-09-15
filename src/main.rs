@@ -1,22 +1,22 @@
 #[allow(dead_code)]
 mod knowledge_graph;
 
+use std::error::Error;
+
 use knowledge_graph::KnowledgeGraph;
 
-fn main() {
-    // Draw a non-descript graph
-    let mut graph: KnowledgeGraph<_> = [
-        ("v1", "v2"),
-        ("v1", "v3"),
-        ("v1", "v4"),
-        ("v2", "v3"),
-        ("v2", "v4"),
-        ("v3", "v4"),
-        ("v4", "v5"),
-        ("v5", "v6"),
-        ("v6", "v7"),
-        ("v7", "v5")
-    ].into_iter().collect();
-    graph.shuffle_vertex_ids();
-    graph.write_to_dot_file("tests/verifiers/tiny.dot").unwrap();
+fn main() -> Result<(), Box<dyn Error>> {
+    // Load a graph, shuffle it, and write it
+    let mut graph = KnowledgeGraph::from_dot_file("tests/verifiers/tiny.dot")?;
+    graph.shuffle_vertex_ids(2);
+    graph.write_to_dot_file("data/test/0.dot")?;
+
+    // Perform 10 clusters, writing the results of each iteration
+    for i in 0..10 {
+        graph.cluster();
+        let filename = format!("data/test/{}.dot", i + 1);
+        graph.write_to_dot_file(filename)?;
+    }
+
+    Ok(())
 }

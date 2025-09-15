@@ -5,7 +5,9 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
+use rand::rngs::StdRng;
 use rand::seq::index::sample;
+use rand::SeedableRng;
 
 /// KnowledgeGraph stores a sparse graph in an edge list format. For now, the
 /// graph will be undirected and uncolored -- these features will be added later.
@@ -75,12 +77,34 @@ impl<V: Ord> KnowledgeGraph<V> {
     /// not meaningfully alter the actual structure of the graph, it does
     /// effectively ensure that the graph is unclustered for the purposes of
     /// the clustering algorithm of this project.
-    pub fn shuffle_vertex_ids(&mut self) {
+    pub fn shuffle_vertex_ids(&mut self, seed: u64) {
         let num_verts = self.vertex_mapping.len();
 
-        let mut rng = rand::rng();
+        let mut rng = StdRng::seed_from_u64(seed);
         let new_mapping = sample(&mut rng, num_verts, num_verts).into_vec();
 
+        self.remap_vertices(&new_mapping);
+    }
+
+    /// Performs one iteration of the block factorization algorithm.
+    pub fn cluster(&mut self) {
+        // Get the weight per vertex
+        let mut weights = vec![0.0; self.vertex_mapping.len()];
+        for &(id1, id2) in &self.edges {
+            weights[id1] += 1.0 / (id2 as f64).exp();
+            weights[id2] += 1.0 / (id1 as f64).exp(); // TODO: Assumes undigraph
+        }
+
+        // Order by weight descending. Equal weights are a virtual impossibility,
+        // so we can use an unstable sort
+        let mut weights: Vec<_> = weights.into_iter().enumerate().collect();
+        weights.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+
+        // Get new mapping and apply it
+        let mut new_mapping = vec![0; weights.len()];
+        for (new_idx, (old_idx, _)) in weights.into_iter().enumerate() {
+            new_mapping[old_idx] = new_idx;
+        }
         self.remap_vertices(&new_mapping);
     }
 
@@ -100,7 +124,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         file.write_all(b"graph {\n")?;
 
         // Write vertex labels, ensuring they are sorted by ID
-        for (id, v) in &id_to_vertex_mapping {
+        for (v, id) in &self.vertex_mapping {
             file.write_fmt(format_args!("\t{} [label=\"{} ({})\"]\n", v, v, id))?;
         }
         file.write_all(b"\n")?;
