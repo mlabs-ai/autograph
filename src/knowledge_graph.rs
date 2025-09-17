@@ -63,8 +63,7 @@ impl<V: Ord> KnowledgeGraph<V> {
     /// old ID, while the entry itself will correspond to the new ID.
     pub fn remap_vertices(&mut self, new_mapping: &[usize]) {
         for old_id in self.vertex_mapping.values_mut() {
-            let new_id = new_mapping[*old_id];
-            *old_id = new_id;
+            *old_id = new_mapping[*old_id];
         }
 
         for (old_src, old_dst) in self.edges.iter_mut() {
@@ -96,7 +95,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
-        // so we can use an unstable sort
+        // so we can use an unstable sort to save memory
         let mut weights: Vec<_> = weights.into_iter().enumerate().collect();
         weights.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
 
@@ -108,7 +107,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         self.remap_vertices(&new_mapping);
     }
 
-    /// Write the graph as a dot file to the given path.
+    /// Write the graph as a Graphviz dot file to the given path.
     pub fn write_to_dot_file<P>(&self, path: P) -> Result<(), Box<dyn Error>> 
     where 
         P: AsRef<Path>,
@@ -162,15 +161,15 @@ impl KnowledgeGraph<String> {
         vs.sort();
 
         // Convert the graph to this format
-        let mut g = Self::new();
+        let mut graph = Self::new();
         for v in vs {
-            g.add_vertex(v.to_string());
+            graph.add_vertex(v.to_string());
         }
         for e in can_graph.edges.set {
-            g.add_edge(e.from, e.to);
+            graph.add_edge(e.from, e.to);
         }
 
-        Ok(g)
+        Ok(graph)
     }
 }
 
