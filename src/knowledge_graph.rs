@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Display;
-use std::fs::File;
+use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::Path;
 
@@ -86,12 +86,12 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster(&mut self) {
+    pub fn cluster(&mut self, factor: f64) {
         // Get the weight per vertex
         let mut weights = vec![0.0; self.vertex_mapping.len()];
         for &(id1, id2) in &self.edges {
-            weights[id1] += 1.0 / (id2 as f64).exp();
-            weights[id2] += 1.0 / (id1 as f64).exp(); // TODO: Assumes undigraph
+            weights[id1] += (-factor * id2 as f64).exp();
+            weights[id2] += (-factor * id1 as f64).exp(); // TODO: Assumes undigraph
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
@@ -119,6 +119,9 @@ impl<V: Ord> KnowledgeGraph<V> {
             .collect();
 
         // Open file and write file header
+        if let Some(parent_dir) = path.as_ref().parent() {
+            create_dir_all(parent_dir)?;
+        }
         let mut file = File::create(path)?;
         file.write_all(b"graph {\n")?;
 
