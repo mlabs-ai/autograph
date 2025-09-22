@@ -46,6 +46,7 @@ impl GraphBuilder {
             return Err("Edge density must be between 0 and 1".into())
         }
 
+        // Determine the ID for the new cluster
         let cluster_id = self.clusters.len();
 
         // Create and name all nodes in this cluster
@@ -83,19 +84,17 @@ impl GraphBuilder {
         num_nodes_b: usize
     ) -> Result<usize, Box<dyn Error>> {
         // Perform some sanity checks
-        if num_nodes_a == 0 {
-            return Err("Cluster can't be empty".into());
-        }
-        if num_nodes_b == 0 {
+        if num_nodes_a == 0 || num_nodes_b == 0 {
             return Err("Cluster can't be empty".into());
         }
 
+        // Determine the ID for the new cluster
         let cluster_id = self.clusters.len();
 
         // Create all nodes on side A
         let mut cluster_nodes_a = Vec::new();
         for i in 0..num_nodes_a {
-            let node_id = format!("ba{}_n{}", cluster_id, i);
+            let node_id = format!("b{}_a_n{}", cluster_id, i);
             cluster_nodes_a.push(node_id.clone());
             self.graph.add_vertex(node_id);
         }
@@ -103,7 +102,7 @@ impl GraphBuilder {
         // Create all nodes on side B
         let mut cluster_nodes_b = Vec::new();
         for i in 0..num_nodes_b {
-            let node_id = format!("bb{}_n{}", cluster_id, i);
+            let node_id = format!("b{}_b_n{}", cluster_id, i);
             cluster_nodes_b.push(node_id.clone());
             self.graph.add_vertex(node_id);
         }
@@ -133,6 +132,7 @@ impl GraphBuilder {
             return Err("Cluster can't be empty".into());
         }
 
+        // Determine the ID for the new cluster
         let cluster_id = self.clusters.len();
 
         // Create and name all nodes in this cluster
@@ -215,20 +215,21 @@ impl GraphBuilder {
                 let cluster2_node_id = (0..cluster2_nodes.len())
                     .choose(&mut self.rng)
                     .unwrap();
+                let possible_link = (cluster1_node_id, cluster2_node_id);
 
                 // If the link is not already present, we can add it
                 let link_present = self.links
                     .get(&cluster1_id)
                     .and_then(|clusters| clusters.get(&cluster2_id))
-                    .map(|links| links.contains(&(cluster1_node_id, cluster2_node_id)))
+                    .map(|links| links.contains(&possible_link))
                     .unwrap_or(false);
                 if !link_present {
-                    link = Some((cluster1_node_id, cluster2_node_id));
+                    link = Some(possible_link);
                 }
             }
         }
 
-        // Otherwise, we need to select from list of available linkages
+        // Otherwise, it is faster to select from list of available linkages
         else {
             // Determine which available link we'll add
             let num_remaining_links = num_possible_links - num_existing_links;
@@ -240,14 +241,16 @@ impl GraphBuilder {
             'outer: for cluster1_node_id in 0..cluster1_nodes.len() {
                 for cluster2_node_id in 0..cluster2_nodes.len() {
                     let possible_link = (cluster1_node_id, cluster2_node_id);
-                    if !existing_links.contains(&possible_link) {
-                        if links_found == link_to_add {
-                            link = Some(possible_link);
-                            break 'outer;
-                        }
-                        else {
-                            links_found += 1;
-                        }
+                    if existing_links.contains(&possible_link) {
+                        continue;
+                    }
+
+                    if links_found == link_to_add {
+                        link = Some(possible_link);
+                        break 'outer;
+                    }
+                    else {
+                        links_found += 1;
                     }
                 }
             }
@@ -411,19 +414,19 @@ mod tests {
         builder.add_bipartite_cluster(3, 2).unwrap();
 
         let mut graph = KnowledgeGraph::new();
-        graph.add_vertex("ba0_n0".to_owned());
-        graph.add_vertex("ba0_n1".to_owned());
-        graph.add_vertex("ba0_n2".to_owned());
-        graph.add_vertex("bb0_n0".to_owned());
-        graph.add_vertex("bb0_n1".to_owned());
+        graph.add_vertex("b0_a_n0".to_owned());
+        graph.add_vertex("b0_a_n1".to_owned());
+        graph.add_vertex("b0_a_n2".to_owned());
+        graph.add_vertex("b0_b_n0".to_owned());
+        graph.add_vertex("b0_b_n1".to_owned());
 
         let edges = [
-            ("ba0_n0".to_owned(), "bb0_n0".to_owned()),
-            ("ba0_n0".to_owned(), "bb0_n1".to_owned()),
-            ("ba0_n1".to_owned(), "bb0_n0".to_owned()),
-            ("ba0_n1".to_owned(), "bb0_n1".to_owned()),
-            ("ba0_n2".to_owned(), "bb0_n0".to_owned()),
-            ("ba0_n2".to_owned(), "bb0_n1".to_owned()),
+            ("b0_a_n0".to_owned(), "b0_b_n0".to_owned()),
+            ("b0_a_n0".to_owned(), "b0_b_n1".to_owned()),
+            ("b0_a_n1".to_owned(), "b0_b_n0".to_owned()),
+            ("b0_a_n1".to_owned(), "b0_b_n1".to_owned()),
+            ("b0_a_n2".to_owned(), "b0_b_n0".to_owned()),
+            ("b0_a_n2".to_owned(), "b0_b_n1".to_owned()),
         ];
         for (v1, v2) in edges {
             graph.add_edge(v1, v2);

@@ -26,6 +26,7 @@ pub struct KnowledgeGraph<V: Ord> {
 }
 
 impl<V: Ord> PartialEq for KnowledgeGraph<V> {
+    /// Implements `eq` in such a way that the order of edges is not important.
     fn eq(&self, other: &Self) -> bool {
         let self_edge_set: HashSet<_> = self.edges.iter().collect();
         let other_edge_set: HashSet<_> = other.edges.iter().collect();
