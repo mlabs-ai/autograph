@@ -17,6 +17,14 @@ pub struct GraphBuilder {
     rng: StdRng
 }
 
+macro_rules! check_condition {
+    ($cond:expr, $($msg:expr),+) => {
+        if !($cond) {
+            return Err(format!($($msg),+).into());
+        }
+    };
+}
+
 impl GraphBuilder {
     /// Create a new `GraphBuilder`. A `seed` is given for reproducability.
     pub fn new(seed: u64) -> Self {
@@ -39,12 +47,11 @@ impl GraphBuilder {
         edge_density: f64
     ) -> Result<usize, Box<dyn Error>> {
         // Perform some sanity checks
-        if num_nodes == 0 {
-            return Err("Cluster can't be empty".into());
-        }
-        if !(0.0..=1.0).contains(&edge_density) {
-            return Err("Edge density must be between 0 and 1".into())
-        }
+        check_condition!(num_nodes > 0, "Cluster can't be empty");
+        check_condition!(
+            (0.0..=1.0).contains(&edge_density),
+            "Edge density must be between 0 and 1"
+        );
 
         // Determine the ID for the new cluster
         let cluster_id = self.clusters.len();
@@ -84,9 +91,10 @@ impl GraphBuilder {
         num_nodes_b: usize
     ) -> Result<usize, Box<dyn Error>> {
         // Perform some sanity checks
-        if num_nodes_a == 0 || num_nodes_b == 0 {
-            return Err("Cluster can't be empty".into());
-        }
+        check_condition!(
+            num_nodes_a > 0 && num_nodes_b > 0,
+            "Cluster can't be empty"
+        );
 
         // Determine the ID for the new cluster
         let cluster_id = self.clusters.len();
@@ -128,9 +136,7 @@ impl GraphBuilder {
         &mut self,
         num_nodes: usize
     ) -> Result<usize, Box<dyn Error>> {
-        if num_nodes == 0 {
-            return Err("Cluster can't be empty".into());
-        }
+        check_condition!(num_nodes > 0, "Cluster can't be empty");
 
         // Determine the ID for the new cluster
         let cluster_id = self.clusters.len();
@@ -168,15 +174,20 @@ impl GraphBuilder {
         cluster2_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
-        if cluster1_id == cluster2_id {
-            return Err("Links must be made between separate clusters".into());
-        }
-        if cluster1_id >= self.clusters.len() {
-            return Err(format!("Cluster {} does not exist", cluster1_id).into());
-        }
-        if cluster2_id >= self.clusters.len() {
-            return Err(format!("Cluster {} does not exist", cluster2_id).into());
-        }
+        check_condition!(
+            cluster1_id != cluster2_id,
+            "Links must be made between separate clusters"
+        );
+        check_condition!(
+            cluster1_id < self.clusters.len(),
+            "Cluster {} does not exist",
+            cluster1_id
+        );
+        check_condition!(
+            cluster2_id < self.clusters.len(),
+            "Cluster {} does not exist",
+            cluster2_id
+        );
 
         // Make sure c1 < c2
         let mut cluster1_id = cluster1_id;
@@ -196,13 +207,12 @@ impl GraphBuilder {
         let num_possible_links = cluster1_nodes.len() * cluster2_nodes.len();
 
         // Make sure there are links that can be made
-        if num_existing_links >= num_possible_links {
-            return Err(format!(
-                "All possible links between clusters {} and {} have been made",
-                cluster1_id,
-                cluster2_id
-            ).into());
-        }
+        check_condition!(
+            num_existing_links < num_possible_links,
+            "All possible links between clusters {} and {} have been made",
+            cluster1_id,
+            cluster2_id
+        );
 
         // Since we are not memoizing the list of remaining links between every
         // cluster, the fastest approach for finding a random link that can be
@@ -210,7 +220,7 @@ impl GraphBuilder {
         // been created. The other main approach of creating a list of links
         // that have not yet been created and randomly choosing from that is
         // only faster if the number of remaining links is precisely 1.
-        let link = loop {
+        let (cluster1_node_id, cluster2_node_id) = loop {
             // Select random nodes from each cluster
             let cluster1_node_id = (0..cluster1_nodes.len())
                 .choose(&mut self.rng)
@@ -218,21 +228,20 @@ impl GraphBuilder {
             let cluster2_node_id = (0..cluster2_nodes.len())
                 .choose(&mut self.rng)
                 .unwrap();
-            let possible_link = (cluster1_node_id, cluster2_node_id);
+            let link_candidate = (cluster1_node_id, cluster2_node_id);
 
             // If the link is not already present, we have found our new link
             let link_present = self.links
                 .get(&cluster1_id)
                 .and_then(|clusters| clusters.get(&cluster2_id))
-                .map(|links| links.contains(&possible_link))
+                .map(|links| links.contains(&link_candidate))
                 .unwrap_or(false);
             if !link_present {
-                break possible_link;
+                break link_candidate;
             }
         };
         
         // Record the link
-        let (cluster1_node_id, cluster2_node_id) = link;
         self.add_link(cluster1_id, cluster2_id, cluster1_node_id, cluster2_node_id)
     }
 
@@ -252,29 +261,32 @@ impl GraphBuilder {
         cluster2_node_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
-        if cluster1_id == cluster2_id {
-            return Err("Links must be made between separate clusters".into());
-        }
-        if cluster1_id >= self.clusters.len() {
-            return Err(format!("Cluster {} does not exist", cluster1_id).into());
-        }
-        if cluster1_node_id >= self.clusters[cluster1_id].len() {
-            return Err(format!(
-                "Cluster {} does not have node {}",
-                cluster1_id,
-                cluster1_node_id
-            ).into());
-        }
-        if cluster2_id >= self.clusters.len() {
-            return Err(format!("Cluster {} does not exist", cluster2_id).into());
-        }
-        if cluster2_node_id >= self.clusters[cluster2_id].len() {
-            return Err(format!(
-                "Cluster {} does not have node {}",
-                cluster2_id,
-                cluster2_node_id
-            ).into());
-        }
+        check_condition!(
+            cluster1_id != cluster2_id,
+            "Links must be made between separate clusters"
+        );
+        check_condition!(
+            cluster1_id < self.clusters.len(),
+            "Cluster {} does not exist",
+            cluster1_id
+        );
+        check_condition!(
+            cluster2_id < self.clusters.len(),
+            "Cluster {} does not exist",
+            cluster2_id
+        );
+        check_condition!(
+            cluster1_node_id < self.clusters[cluster1_id].len(),
+            "Cluster {} does not have node {}",
+            cluster1_id,
+            cluster1_node_id
+        );
+        check_condition!(
+            cluster2_node_id < self.clusters[cluster2_id].len(),
+            "Cluster {} does not have node {}",
+            cluster2_id,
+            cluster2_node_id
+        );
 
         // Make sure c1 < c2
         let mut cluster1_id = cluster1_id;
@@ -293,24 +305,19 @@ impl GraphBuilder {
             .and_then(|clusters| clusters.get(&cluster2_id))
             .map(|links| links.contains(&link))
             .unwrap_or(false);
-        if !link_present {
-            // Record the link
-            self.links
-                .entry(cluster1_id)
-                .or_default()
-                .entry(cluster2_id)
-                .or_default()
-                .insert(link);
+        check_condition!(!link_present, "The specified link already exists");
 
-            // Add it to the graph
-            let cluser1_node_name = &self.clusters[cluster1_id][cluster1_node_id];
-            let cluser2_node_name = &self.clusters[cluster2_id][cluster2_node_id];
-            self.graph.add_edge(cluser1_node_name.to_owned(), cluser2_node_name.to_owned());
-            Ok(())
-        }
-        else {
-            Err("The specified link already exists".into())
-        }
+        // Record the link
+        self.links
+            .entry(cluster1_id).or_default()
+            .entry(cluster2_id).or_default()
+            .insert(link);
+
+        // Add it to the graph
+        let cluser1_node_name = &self.clusters[cluster1_id][cluster1_node_id];
+        let cluser2_node_name = &self.clusters[cluster2_id][cluster2_node_id];
+        self.graph.add_edge(cluser1_node_name.to_owned(), cluser2_node_name.to_owned());
+        Ok(())
     }
 
     /// Get the list of nodes in the specified cluster.
