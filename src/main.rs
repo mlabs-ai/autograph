@@ -1,5 +1,7 @@
 #[allow(dead_code)]
 mod knowledge_graph;
+#[allow(dead_code)]
+mod graph_builder;
 
 use std::error::Error;
 use std::path::Path;
@@ -43,7 +45,7 @@ fn show_progression<P: AsRef<Path>>(
     // Perform the specified number of clusters, writing the results of each iteration
     for i in 0..num_iterations {
         graph.cluster(factor);
-        let filename = format_file_name(dot_file_name, shuffle_seed, factor, i);
+        let filename = format_file_name(dot_file_name, shuffle_seed, factor, i + 1);
         graph.write_to_dot_file(filename)?;
     }
 
@@ -51,7 +53,20 @@ fn show_progression<P: AsRef<Path>>(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    show_progression("tests/verifiers/small_1.dot", 10, 2, 1.0)?;
+    let graphs = [
+        "tests/verifiers/tiny.dot",
+        "tests/verifiers/small.dot",
+        "tests/verifiers/small_1.dot"
+    ];
+    let factors = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0];
+
+    for graph in graphs {
+        for seed in 0..10 {
+            for factor in factors {
+                show_progression(graph, 10, seed, factor)?;
+            }
+        }
+    }
 
     Ok(())
 }

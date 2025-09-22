@@ -1,0 +1,509 @@
+use crate::knowledge_graph::KnowledgeGraph;
+
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::mem;
+
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::seq::IteratorRandom;
+
+/// `GraphBuilder` is a struct that allows one to easily construct a complex
+/// `KnowledgeGraph<String>`.
+pub struct GraphBuilder {
+    graph: KnowledgeGraph<String>,
+    clusters: Vec<Vec<String>>,
+    links: HashMap<usize, HashMap<usize, HashSet<(usize, usize)>>>,
+    rng: StdRng
+}
+
+impl GraphBuilder {
+    /// Create a new `GraphBuilder`. A `seed` is given for reproducability.
+    pub fn new(seed: u64) -> Self {
+        Self {
+            graph: KnowledgeGraph::new(),
+            clusters: Vec::new(),
+            links: HashMap::new(),
+            rng: StdRng::seed_from_u64(seed)
+        }
+    }
+
+    /// Create a cluster. Each node has a probility `edge_density` of being
+    /// connected to any other node in the cluster.
+    /// 
+    /// Fails if `num_nodes` is 0 or `edge_density` is not in the range [0.0,
+    /// 1.0].
+    pub fn add_dense_cluster(
+        &mut self,
+        num_nodes: usize,
+        edge_density: f64
+    ) -> Result<usize, Box<dyn Error>> {
+        // Perform some sanity checks
+        if num_nodes == 0 {
+            return Err("Cluster can't be empty".into());
+        }
+        if !(0.0..=1.0).contains(&edge_density) {
+            return Err("Edge density must be between 0 and 1".into())
+        }
+
+        let cluster_id = self.clusters.len();
+
+        // Create and name all nodes in this cluster
+        let mut cluster_nodes = Vec::new();
+        for i in 0..num_nodes {
+            let node_id = format!("d{}_n{}", cluster_id, i);
+            cluster_nodes.push(node_id.clone());
+            self.graph.add_vertex(node_id);
+        }
+
+        // Add edges probabilistically
+        for i in 0 .. cluster_nodes.len() - 1 {
+            let v1 = &cluster_nodes[i];
+            for v2 in cluster_nodes.iter().skip(i + 1) {
+                if self.rng.random_bool(edge_density) {
+                    self.graph.add_edge(v1.clone(), v2.clone());
+                }
+            }
+        }
+
+        // Record the cluster
+        self.clusters.push(cluster_nodes);
+
+        Ok(cluster_id)
+    }
+
+    /// Create a bipartite cluster. One side will have `num_nodes_a` nodes, while
+    /// the other will have `num_nodes_b`. Each node on side a will be connected
+    /// to every node on side b.
+    /// 
+    /// Fails if either `num_nodes_a` or `num_nodes_b` is 0.
+    pub fn add_bipartite_cluster(
+        &mut self,
+        num_nodes_a: usize,
+        num_nodes_b: usize
+    ) -> Result<usize, Box<dyn Error>> {
+        // Perform some sanity checks
+        if num_nodes_a == 0 {
+            return Err("Cluster can't be empty".into());
+        }
+        if num_nodes_b == 0 {
+            return Err("Cluster can't be empty".into());
+        }
+
+        let cluster_id = self.clusters.len();
+
+        // Create all nodes on side A
+        let mut cluster_nodes_a = Vec::new();
+        for i in 0..num_nodes_a {
+            let node_id = format!("ba{}_n{}", cluster_id, i);
+            cluster_nodes_a.push(node_id.clone());
+            self.graph.add_vertex(node_id);
+        }
+
+        // Create all nodes on side B
+        let mut cluster_nodes_b = Vec::new();
+        for i in 0..num_nodes_b {
+            let node_id = format!("bb{}_n{}", cluster_id, i);
+            cluster_nodes_b.push(node_id.clone());
+            self.graph.add_vertex(node_id);
+        }
+
+        // Create all edges
+        for v1 in &cluster_nodes_a {
+            for v2 in &cluster_nodes_b {
+                self.graph.add_edge(v1.clone(), v2.clone());
+            }
+        }
+
+        // Record the cluster
+        cluster_nodes_a.append(&mut cluster_nodes_b);
+        self.clusters.push(cluster_nodes_a);
+
+        Ok(cluster_id)
+    }
+
+    /// Create a cluster where all the nodes are connected in a ring structure.
+    /// 
+    /// Fails if `num_nodes` is 0.
+    pub fn add_circle_cluster(
+        &mut self,
+        num_nodes: usize
+    ) -> Result<usize, Box<dyn Error>> {
+        if num_nodes == 0 {
+            return Err("Cluster can't be empty".into());
+        }
+
+        let cluster_id = self.clusters.len();
+
+        // Create and name all nodes in this cluster
+        let mut cluster_nodes = Vec::new();
+        for i in 0..num_nodes {
+            let node_id = format!("c{}_n{}", cluster_id, i);
+            cluster_nodes.push(node_id.clone());
+            self.graph.add_vertex(node_id);
+        }
+
+        // Add edges
+        for i in 0..cluster_nodes.len() {
+            let j = (i + 1) % cluster_nodes.len();
+            self.graph.add_edge(cluster_nodes[i].clone(), cluster_nodes[j].clone());
+        }
+
+        // Record the cluster
+        self.clusters.push(cluster_nodes);
+
+        Ok(cluster_id)
+    }
+
+    /// Create a link between two clusters. The link will be randomly chosen from
+    /// any two nodes that do not already have an edge.
+    /// 
+    /// Fails under any of the following cicumstances:
+    /// - `cluster1_id` and `cluster2_id` are the same.
+    /// - Either cluster does not already exist.
+    /// - All possible links have already been created.
+    pub fn add_random_link(
+        &mut self,
+        cluster1_id: usize,
+        cluster2_id: usize
+    ) -> Result<(), Box<dyn Error>> {
+        // Perform some sanity checks
+        if cluster1_id == cluster2_id {
+            return Err("Links must be made between separate clusters".into());
+        }
+        if cluster1_id >= self.clusters.len() {
+            return Err(format!("Cluster {} does not exist", cluster1_id).into());
+        }
+        if cluster2_id >= self.clusters.len() {
+            return Err(format!("Cluster {} does not exist", cluster2_id).into());
+        }
+
+        // Make sure c1 < c2
+        let mut cluster1_id = cluster1_id;
+        let mut cluster2_id = cluster2_id;
+        if cluster2_id < cluster1_id {
+            mem::swap(&mut cluster1_id, &mut cluster2_id);
+        }
+
+        // Determine number of links present vs number of possible links
+        let num_existing_links = self.links
+            .get(&cluster1_id)
+            .and_then(|clusters| clusters.get(&cluster2_id))
+            .map(|links| links.len())
+            .unwrap_or(0);
+        let cluster1_nodes = &self.clusters[cluster1_id];
+        let cluster2_nodes = &self.clusters[cluster2_id];
+        let num_possible_links = cluster1_nodes.len() * cluster2_nodes.len();
+
+        // Make sure there are links that can be made
+        if num_existing_links >= num_possible_links {
+            return Err(format!(
+                "All possible links between clusters {} and {} have been made",
+                cluster1_id,
+                cluster2_id
+            ).into());
+        }
+
+        // If the number of links is low, we can randomly choose linkages
+        let mut link = None;
+        if num_existing_links <= num_possible_links / 4 {
+            while link.is_none() {
+                // Select random nodes from each cluster
+                let cluster1_node_id = (0..cluster1_nodes.len())
+                    .choose(&mut self.rng)
+                    .unwrap();
+                let cluster2_node_id = (0..cluster2_nodes.len())
+                    .choose(&mut self.rng)
+                    .unwrap();
+
+                // If the link is not already present, we can add it
+                let link_present = self.links
+                    .get(&cluster1_id)
+                    .and_then(|clusters| clusters.get(&cluster2_id))
+                    .map(|links| links.contains(&(cluster1_node_id, cluster2_node_id)))
+                    .unwrap_or(false);
+                if !link_present {
+                    link = Some((cluster1_node_id, cluster2_node_id));
+                }
+            }
+        }
+
+        // Otherwise, we need to select from list of available linkages
+        else {
+            // Determine which available link we'll add
+            let num_remaining_links = num_possible_links - num_existing_links;
+            let link_to_add = self.rng.random_range(0..num_remaining_links);
+
+            // Iterate through available links and select the one we want to add
+            let existing_links = &self.links[&cluster1_id][&cluster2_id];
+            let mut links_found = 0;
+            'outer: for cluster1_node_id in 0..cluster1_nodes.len() {
+                for cluster2_node_id in 0..cluster2_nodes.len() {
+                    let possible_link = (cluster1_node_id, cluster2_node_id);
+                    if !existing_links.contains(&possible_link) {
+                        if links_found == link_to_add {
+                            link = Some(possible_link);
+                            break 'outer;
+                        }
+                        else {
+                            links_found += 1;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Record the link
+        let link = link.unwrap();
+        let (cluster1_node_id, cluster2_node_id) = link;
+        self.add_link(cluster1_id, cluster2_id, cluster1_node_id, cluster2_node_id)
+    }
+
+    /// Add a link between a specific node in one cluster and a specific node in
+    /// another cluster.
+    /// 
+    /// Fails under any of the following cicumstances:
+    /// - `cluster1_id` and `cluster2_id` are the same.
+    /// - Either cluster does not already exist.
+    /// - Either specified node does not exist in its cluster.
+    /// - The specified link has already been created.
+    pub fn add_link(
+        &mut self,
+        cluster1_id: usize,
+        cluster2_id: usize,
+        cluster1_node_id: usize,
+        cluster2_node_id: usize
+    ) -> Result<(), Box<dyn Error>> {
+        // Perform some sanity checks
+        if cluster1_id == cluster2_id {
+            return Err("Links must be made between separate clusters".into());
+        }
+        if cluster1_id >= self.clusters.len() {
+            return Err(format!("Cluster {} does not exist", cluster1_id).into());
+        }
+        if cluster1_node_id >= self.clusters[cluster1_id].len() {
+            return Err(format!(
+                "Cluster {} does not have node {}",
+                cluster1_id,
+                cluster1_node_id
+            ).into());
+        }
+        if cluster2_id >= self.clusters.len() {
+            return Err(format!("Cluster {} does not exist", cluster2_id).into());
+        }
+        if cluster2_node_id >= self.clusters[cluster2_id].len() {
+            return Err(format!(
+                "Cluster {} does not have node {}",
+                cluster2_id,
+                cluster2_node_id
+            ).into());
+        }
+
+        // Make sure c1 < c2
+        let mut cluster1_id = cluster1_id;
+        let mut cluster2_id = cluster2_id;
+        let mut cluster1_node_id = cluster1_node_id;
+        let mut cluster2_node_id = cluster2_node_id;
+        if cluster2_id < cluster1_id {
+            mem::swap(&mut cluster1_id, &mut cluster2_id);
+            mem::swap(&mut cluster1_node_id, &mut cluster2_node_id);
+        }
+
+        // Determine if the link already exists
+        let link = (cluster1_node_id, cluster2_node_id);
+        let link_present = self.links
+            .get(&cluster1_id)
+            .and_then(|clusters| clusters.get(&cluster2_id))
+            .map(|links| links.contains(&link))
+            .unwrap_or(false);
+        if !link_present {
+            // Record the link
+            self.links
+                .entry(cluster1_id)
+                .or_default()
+                .entry(cluster2_id)
+                .or_default()
+                .insert(link);
+
+            // Add it to the graph
+            let cluser1_node_name = &self.clusters[cluster1_id][cluster1_node_id];
+            let cluser2_node_name = &self.clusters[cluster2_id][cluster2_node_id];
+            self.graph.add_edge(cluser1_node_name.to_owned(), cluser2_node_name.to_owned());
+            Ok(())
+        }
+        else {
+            Err("The specified link already exists".into())
+        }
+    }
+
+    /// Get the list of nodes in the specified cluster.
+    pub fn get_cluster(&self, cluster_id: usize) -> Option<&Vec<String>> {
+        self.clusters.get(cluster_id)
+    }
+
+    /// Consume the builder and return the resulting `KnowledgeGraph<String>`.
+    pub fn finalize_graph(self) -> KnowledgeGraph<String> {
+        self.graph
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::graph_builder::GraphBuilder;
+    use crate::knowledge_graph::KnowledgeGraph;
+
+    #[test]
+    fn empty_graph() {
+        let builder = GraphBuilder::new(0);
+        let graph = KnowledgeGraph::new();
+
+        assert_eq!(graph, builder.finalize_graph());
+    }
+
+    #[test]
+    fn full_single_cluster() {
+        for seed in 0..10 {
+            let mut builder = GraphBuilder::new(seed);
+            builder.add_dense_cluster(3, 1.0).unwrap();
+
+            let graph: KnowledgeGraph<_> = [
+                ("d0_n0".to_owned(), "d0_n1".to_owned()),
+                ("d0_n0".to_owned(), "d0_n2".to_owned()),
+                ("d0_n1".to_owned(), "d0_n2".to_owned())
+            ].into_iter().collect();
+
+            assert_eq!(graph, builder.finalize_graph());
+        }
+    }
+
+    #[test]
+    fn single_cluster_no_edges() {
+        for seed in 0..10 {
+            let mut builder = GraphBuilder::new(seed);
+            builder.add_dense_cluster(3, 0.0).unwrap();
+
+            let mut graph = KnowledgeGraph::new();
+            graph.add_vertex("d0_n0".to_owned());
+            graph.add_vertex("d0_n1".to_owned());
+            graph.add_vertex("d0_n2".to_owned());
+
+            assert_eq!(graph, builder.finalize_graph());
+        }
+    }
+
+    #[test]
+    fn circle() {
+        let mut builder = GraphBuilder::new(0);
+        builder.add_circle_cluster(3).unwrap();
+
+        let graph: KnowledgeGraph<_> = [
+            ("c0_n0".to_owned(), "c0_n1".to_owned()),
+            ("c0_n1".to_owned(), "c0_n2".to_owned()),
+            ("c0_n0".to_owned(), "c0_n2".to_owned())
+        ].into_iter().collect();
+
+        assert_eq!(graph, builder.finalize_graph());
+    }
+
+    #[test]
+    fn bipartite() {
+        let mut builder = GraphBuilder::new(0);
+        builder.add_bipartite_cluster(3, 2).unwrap();
+
+        let mut graph = KnowledgeGraph::new();
+        graph.add_vertex("ba0_n0".to_owned());
+        graph.add_vertex("ba0_n1".to_owned());
+        graph.add_vertex("ba0_n2".to_owned());
+        graph.add_vertex("bb0_n0".to_owned());
+        graph.add_vertex("bb0_n1".to_owned());
+
+        let edges = [
+            ("ba0_n0".to_owned(), "bb0_n0".to_owned()),
+            ("ba0_n0".to_owned(), "bb0_n1".to_owned()),
+            ("ba0_n1".to_owned(), "bb0_n0".to_owned()),
+            ("ba0_n1".to_owned(), "bb0_n1".to_owned()),
+            ("ba0_n2".to_owned(), "bb0_n0".to_owned()),
+            ("ba0_n2".to_owned(), "bb0_n1".to_owned()),
+        ];
+        for (v1, v2) in edges {
+            graph.add_edge(v1, v2);
+        }
+
+        assert_eq!(graph, builder.finalize_graph());
+    }
+
+    #[test]
+    fn full_two_clusters_unconnected() {
+        for seed in 0..10 {
+            let mut builder = GraphBuilder::new(seed);
+            builder.add_dense_cluster(2, 1.0).unwrap();
+            builder.add_dense_cluster(2, 1.0).unwrap();
+
+            let graph: KnowledgeGraph<_> = [
+                ("d0_n0".to_owned(), "d0_n1".to_owned()),
+                ("d1_n0".to_owned(), "d1_n1".to_owned()),
+            ].into_iter().collect();
+
+            assert_eq!(graph, builder.finalize_graph());
+        }
+    }
+
+    #[test]
+    fn full_two_clusters_connected() {
+        for seed in 0..10 {
+            let mut builder = GraphBuilder::new(seed);
+            builder.add_dense_cluster(2, 1.0).unwrap();
+            builder.add_dense_cluster(2, 1.0).unwrap();
+            builder.add_random_link(0, 1).unwrap();
+            builder.add_random_link(0, 1).unwrap();
+            builder.add_random_link(0, 1).unwrap();
+            builder.add_random_link(0, 1).unwrap();
+            assert!(builder.add_random_link(0, 1).is_err());
+
+            let graph: KnowledgeGraph<_> = [
+                ("d0_n0".to_owned(), "d0_n1".to_owned()),
+                ("d1_n0".to_owned(), "d1_n1".to_owned()),
+                ("d0_n0".to_owned(), "d1_n0".to_owned()),
+                ("d0_n0".to_owned(), "d1_n1".to_owned()),
+                ("d0_n1".to_owned(), "d1_n0".to_owned()),
+                ("d0_n1".to_owned(), "d1_n1".to_owned())
+            ].into_iter().collect();
+
+            assert_eq!(graph, builder.finalize_graph());
+        }
+    }
+
+    #[test]
+    fn failures() {
+        let mut builder = GraphBuilder::new(0);
+        assert!(builder.add_dense_cluster(0, 1.0).is_err());
+        assert!(builder.add_dense_cluster(2, 1.1).is_err());
+        assert!(builder.add_dense_cluster(2, -0.1).is_err());
+        assert!(builder.add_dense_cluster(0, 1.1).is_err());
+        assert!(builder.add_dense_cluster(0, -0.1).is_err());
+
+        assert!(builder.add_bipartite_cluster(2, 0).is_err());
+        assert!(builder.add_bipartite_cluster(0, 2).is_err());
+        assert!(builder.add_bipartite_cluster(0, 0).is_err());
+
+        assert!(builder.add_circle_cluster(0).is_err());
+
+        assert!(builder.add_random_link(0, 0).is_err());
+        assert!(builder.add_link(0, 0, 0, 0).is_err());
+
+        builder.add_dense_cluster(5, 1.0).unwrap();
+
+        assert!(builder.add_random_link(0, 1).is_err());
+        assert!(builder.add_random_link(1, 0).is_err());
+        assert!(builder.add_link(0, 1, 0, 0).is_err());
+        assert!(builder.add_link(1, 0, 0, 0).is_err());
+
+        builder.add_dense_cluster(5, 1.0).unwrap();
+
+        assert!(builder.add_link(0, 1, 0, 5).is_err());
+        assert!(builder.add_link(1, 0, 5, 0).is_err());
+
+        builder.add_link(0, 1, 0, 0).unwrap();
+        assert!(builder.add_link(0, 1, 0, 0).is_err());
+    }
+}

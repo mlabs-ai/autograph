@@ -1,15 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
+use std::mem;
 use std::path::Path;
 
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
-use rand::SeedableRng;
 
-/// KnowledgeGraph stores a sparse graph in an edge list format. For now, the
+/// `KnowledgeGraph` stores a sparse graph in an edge list format. For now, the
 /// graph will be undirected and uncolored -- these features will be added later.
 /// 
 /// Vertices can be represented by anything hashable (e.g., a `String`), but in
@@ -18,10 +19,18 @@ use rand::SeedableRng;
 /// where each item is a tuple `(usize, usize)`, where the first item is the ID
 /// of the vertex at one end of the edge, and the second item is the ID of the
 /// other vertex.
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Eq, Debug)]
 pub struct KnowledgeGraph<V: Ord> {
     edges: Vec<(usize, usize)>,
     vertex_mapping: BTreeMap<V, usize>
+}
+
+impl<V: Ord> PartialEq for KnowledgeGraph<V> {
+    fn eq(&self, other: &Self) -> bool {
+        let self_edge_set: HashSet<_> = self.edges.iter().collect();
+        let other_edge_set: HashSet<_> = other.edges.iter().collect();
+        self_edge_set == other_edge_set && self.vertex_mapping == other.vertex_mapping
+    }
 }
 
 impl<V: Ord> KnowledgeGraph<V> {
@@ -53,8 +62,16 @@ impl<V: Ord> KnowledgeGraph<V> {
     /// Adds an edge to the graph. If any of the vertices on either side of the
     /// edge is not already in the graph, it will be added.
     pub fn add_edge(&mut self, v1: V, v2: V) {
-        let index1 = self.add_vertex(v1);
-        let index2 = self.add_vertex(v2);
+        let mut index1 = self.add_vertex(v1);
+        let mut index2 = self.add_vertex(v2);
+
+        // TODO: For determinism purposes, it helps to order these indices.
+        // This only works since the graph is unirected; once we add direction,
+        // this won't work.
+        if index2 < index1 {
+            mem::swap(&mut index1, &mut index2);
+        }
+
         self.edges.push((index1, index2));
     }
 
@@ -161,7 +178,7 @@ impl KnowledgeGraph<String> {
 
         // Sort the vertices for determinism's sake
         let mut vs: Vec<_> = can_graph.nodes.set.keys().collect();
-        vs.sort();
+        vs.sort_unstable();
 
         // Convert the graph to this format
         let mut graph = Self::new();
