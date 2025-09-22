@@ -204,60 +204,34 @@ impl GraphBuilder {
             ).into());
         }
 
-        // If the number of links is low, we can randomly choose linkages
-        let mut link = None;
-        if num_existing_links <= num_possible_links / 4 {
-            while link.is_none() {
-                // Select random nodes from each cluster
-                let cluster1_node_id = (0..cluster1_nodes.len())
-                    .choose(&mut self.rng)
-                    .unwrap();
-                let cluster2_node_id = (0..cluster2_nodes.len())
-                    .choose(&mut self.rng)
-                    .unwrap();
-                let possible_link = (cluster1_node_id, cluster2_node_id);
+        // Since we are not memoizing the list of remaining links between every
+        // cluster, the fastest approach for finding a random link that can be
+        // added is to randomly choose new edges until we find one that has not 
+        // been created. The other main approach of creating a list of links
+        // that have not yet been created and randomly choosing from that is
+        // only faster if the number of remaining links is precisely 1.
+        let link = loop {
+            // Select random nodes from each cluster
+            let cluster1_node_id = (0..cluster1_nodes.len())
+                .choose(&mut self.rng)
+                .unwrap();
+            let cluster2_node_id = (0..cluster2_nodes.len())
+                .choose(&mut self.rng)
+                .unwrap();
+            let possible_link = (cluster1_node_id, cluster2_node_id);
 
-                // If the link is not already present, we can add it
-                let link_present = self.links
-                    .get(&cluster1_id)
-                    .and_then(|clusters| clusters.get(&cluster2_id))
-                    .map(|links| links.contains(&possible_link))
-                    .unwrap_or(false);
-                if !link_present {
-                    link = Some(possible_link);
-                }
+            // If the link is not already present, we have found our new link
+            let link_present = self.links
+                .get(&cluster1_id)
+                .and_then(|clusters| clusters.get(&cluster2_id))
+                .map(|links| links.contains(&possible_link))
+                .unwrap_or(false);
+            if !link_present {
+                break possible_link;
             }
-        }
-
-        // Otherwise, it is faster to select from list of available linkages
-        else {
-            // Determine which available link we'll add
-            let num_remaining_links = num_possible_links - num_existing_links;
-            let link_to_add = self.rng.random_range(0..num_remaining_links);
-
-            // Iterate through available links and select the one we want to add
-            let existing_links = &self.links[&cluster1_id][&cluster2_id];
-            let mut links_found = 0;
-            'outer: for cluster1_node_id in 0..cluster1_nodes.len() {
-                for cluster2_node_id in 0..cluster2_nodes.len() {
-                    let possible_link = (cluster1_node_id, cluster2_node_id);
-                    if existing_links.contains(&possible_link) {
-                        continue;
-                    }
-
-                    if links_found == link_to_add {
-                        link = Some(possible_link);
-                        break 'outer;
-                    }
-                    else {
-                        links_found += 1;
-                    }
-                }
-            }
-        }
+        };
         
         // Record the link
-        let link = link.unwrap();
         let (cluster1_node_id, cluster2_node_id) = link;
         self.add_link(cluster1_id, cluster2_id, cluster1_node_id, cluster2_node_id)
     }
