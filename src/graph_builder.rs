@@ -1,5 +1,7 @@
 use crate::knowledge_graph::KnowledgeGraph;
 
+use itertools::Itertools;
+
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::mem;
@@ -65,14 +67,12 @@ impl GraphBuilder {
         }
 
         // Add edges probabilistically
-        for i in 0 .. cluster_nodes.len() - 1 {
-            let v1 = &cluster_nodes[i];
-            for v2 in cluster_nodes.iter().skip(i + 1) {
-                if self.rng.random_bool(edge_density) {
-                    self.graph.add_edge(v1.clone(), v2.clone());
-                }
-            }
-        }
+        cluster_nodes.iter()
+            .array_combinations()
+            .filter(|_| self.rng.random_bool(edge_density))
+            .for_each(|[v1, v2]| {
+                self.graph.add_edge(v1.clone(), v2.clone())
+            });
 
         // Record the cluster
         self.clusters.push(cluster_nodes);
@@ -170,8 +170,8 @@ impl GraphBuilder {
     /// - All possible links have already been created.
     pub fn add_random_link(
         &mut self,
-        cluster1_id: usize,
-        cluster2_id: usize
+        mut cluster1_id: usize,
+        mut cluster2_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
         check_condition!(
@@ -190,8 +190,6 @@ impl GraphBuilder {
         );
 
         // Make sure c1 < c2
-        let mut cluster1_id = cluster1_id;
-        let mut cluster2_id = cluster2_id;
         if cluster2_id < cluster1_id {
             mem::swap(&mut cluster1_id, &mut cluster2_id);
         }
@@ -242,7 +240,13 @@ impl GraphBuilder {
         };
         
         // Record the link
-        self.add_link(cluster1_id, cluster2_id, cluster1_node_id, cluster2_node_id)
+        self.add_link_unchecked(
+            cluster1_id, 
+            cluster2_id, 
+            cluster1_node_id, 
+            cluster2_node_id
+        );
+        Ok(())
     }
 
     /// Add a link between a specific node in one cluster and a specific node in
@@ -255,10 +259,10 @@ impl GraphBuilder {
     /// - The specified link has already been created.
     pub fn add_link(
         &mut self,
-        cluster1_id: usize,
-        cluster2_id: usize,
-        cluster1_node_id: usize,
-        cluster2_node_id: usize
+        mut cluster1_id: usize,
+        mut cluster2_id: usize,
+        mut cluster1_node_id: usize,
+        mut cluster2_node_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
         check_condition!(
@@ -289,10 +293,6 @@ impl GraphBuilder {
         );
 
         // Make sure c1 < c2
-        let mut cluster1_id = cluster1_id;
-        let mut cluster2_id = cluster2_id;
-        let mut cluster1_node_id = cluster1_node_id;
-        let mut cluster2_node_id = cluster2_node_id;
         if cluster2_id < cluster1_id {
             mem::swap(&mut cluster1_id, &mut cluster2_id);
             mem::swap(&mut cluster1_node_id, &mut cluster2_node_id);
@@ -307,16 +307,13 @@ impl GraphBuilder {
             .unwrap_or(false);
         check_condition!(!link_present, "The specified link already exists");
 
-        // Record the link
-        self.links
-            .entry(cluster1_id).or_default()
-            .entry(cluster2_id).or_default()
-            .insert(link);
-
-        // Add it to the graph
-        let cluser1_node_name = &self.clusters[cluster1_id][cluster1_node_id];
-        let cluser2_node_name = &self.clusters[cluster2_id][cluster2_node_id];
-        self.graph.add_edge(cluser1_node_name.to_owned(), cluser2_node_name.to_owned());
+        // Record the link and add it to the graph
+        self.add_link_unchecked(
+            cluster1_id, 
+            cluster2_id, 
+            cluster1_node_id, 
+            cluster2_node_id
+        );
         Ok(())
     }
 
@@ -328,6 +325,25 @@ impl GraphBuilder {
     /// Consume the builder and return the resulting `KnowledgeGraph<String>`.
     pub fn finalize_graph(self) -> KnowledgeGraph<String> {
         self.graph
+    }
+
+    fn add_link_unchecked(
+        &mut self,
+        cluster1_id: usize,
+        cluster2_id: usize,
+        cluster1_node_id: usize,
+        cluster2_node_id: usize
+    ) {
+        // Record the link
+        self.links
+            .entry(cluster1_id).or_default()
+            .entry(cluster2_id).or_default()
+            .insert((cluster1_node_id, cluster2_node_id));
+
+        // Add it to the graph
+        let cluser1_node_name = &self.clusters[cluster1_id][cluster1_node_id];
+        let cluser2_node_name = &self.clusters[cluster2_id][cluster2_node_id];
+        self.graph.add_edge(cluser1_node_name.clone(), cluser2_node_name.clone());
     }
 }
 

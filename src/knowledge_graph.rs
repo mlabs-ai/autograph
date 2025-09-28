@@ -165,6 +165,20 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         Ok(())
     }
+
+    /// Returns the graph as an adjacency matrix, in row major format.
+    pub fn as_matrix(&self) -> Vec<Vec<bool>> {
+        let num_verts = self.vertex_mapping.len();
+        let mut adj_mat = vec![vec![false; num_verts]; num_verts];
+
+        // TODO: Assumes undirected graph
+        for &(v1, v2) in &self.edges {
+            adj_mat[v1][v2] = true;
+            adj_mat[v2][v1] = true;
+        }
+
+        adj_mat
+    }
 }
 
 impl KnowledgeGraph<String> {
