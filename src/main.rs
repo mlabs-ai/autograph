@@ -8,7 +8,9 @@ use std::error::Error;
 use std::path::Path;
 
 use knowledge_graph::KnowledgeGraph;
+use renderers::StdRendererOutput;
 use renderers::dot_files::DotFileRenderer;
+use renderers::adjacency_matrix_images::AdjacencyMatrixImageRenderer;
 
 fn show_progression<P: AsRef<Path>>(
     path: P,
@@ -16,13 +18,18 @@ fn show_progression<P: AsRef<Path>>(
     shuffle_seed: u64,
     factor: f64
 ) -> Result<(), Box<dyn Error>> {
-    // Get dot file base name and set up the renderer
+    // Get dot file base name and set up the renderers
     let dot_file_name = path
         .as_ref()
         .file_stem()
         .and_then(|p| p.to_str())
         .ok_or("Could not get dot file base name")?;
-    let mut dot_renderer = DotFileRenderer::new_from_default(
+    let mut dot_renderer = DotFileRenderer::from_graph_parameters(
+        dot_file_name,
+        shuffle_seed,
+        factor
+    )?;
+    let mut adj_img_renderer = AdjacencyMatrixImageRenderer::from_graph_parameters(
         dot_file_name,
         shuffle_seed,
         factor
@@ -32,11 +39,13 @@ fn show_progression<P: AsRef<Path>>(
     let mut graph = KnowledgeGraph::from_dot_file(&path)?;
     graph.shuffle_vertex_ids(shuffle_seed);
     dot_renderer.render(&graph)?;
+    adj_img_renderer.render(1024, 1024, &graph)?;
 
     // Perform the specified number of clusters, writing the results of each iteration
     for _ in 0..num_iterations {
         graph.cluster(factor);
         dot_renderer.render(&graph)?;
+        adj_img_renderer.render(1024, 1024, &graph)?;
     }
 
     Ok(())
