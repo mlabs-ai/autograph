@@ -51,6 +51,7 @@ impl AdjacencyMatrixImageRenderer {
         let filepath = self.directory.join(filename);
 
         let adj_mat = graph.as_matrix();
+        let num_verts = adj_mat.len();
 
         let root = BitMapBackend::new(
             &filepath,
@@ -58,15 +59,42 @@ impl AdjacencyMatrixImageRenderer {
         ).into_drawing_area();
         root.fill(&WHITE)?;
 
-        let cells = root.split_evenly((adj_mat.len(), adj_mat.len()));
-        for (edge, cell) in adj_mat.into_iter()
-            .flatten()
-            .zip(cells.into_iter())
-        {
-            if edge {
-                cell.fill(&BLACK)?;
-            }
-        }
+        let title = format!("Iteration {}", curr_iter);
+        let mut chart = ChartBuilder::on(&root)
+            .caption(&title, ("sans-serif", 80))
+            .margin(5)
+            .top_x_label_area_size(40)
+            .y_label_area_size(40)
+            .build_cartesian_2d(0..num_verts, num_verts..0)?;
+
+        chart
+            .configure_mesh()
+            .x_labels(20)
+            .y_labels(20)
+            .max_light_lines(4)
+            .x_label_offset(35)
+            .y_label_offset(25)
+            .disable_x_mesh()
+            .disable_y_mesh()
+            .label_style(("sans-serif", 20))
+            .draw()?;
+
+        chart.draw_series(
+            adj_mat
+                .into_iter()
+                .enumerate()
+                .flat_map(|(y, row)| 
+                    row
+                        .into_iter()
+                        .map(|cell| if cell { &BLACK } else { &WHITE })
+                        .enumerate()
+                        .map(move |(x, color)| (x, y, color))
+                )
+                .map(|(x, y, color)| Rectangle::new(
+                    [(x, y), (x + 1, y + 1)],
+                    color.filled()
+                ))
+        )?;
 
         root.present()?;
         Ok(())
