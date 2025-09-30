@@ -3,6 +3,10 @@ name = "autograph"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "autograph"
+crate-type = ["cdylib"]
+
 [dependencies]
 dot-parser = "0.6.0"
 itertools = "0.14.0"
@@ -11,3 +15,7 @@ rand = "0.9.2"
 
 [dev-dependencies]
 tempfile = "3.22.0"
+
+[dependencies.pyo3]
+version = "0.24.0"
+features = ["abi3-py38"]
