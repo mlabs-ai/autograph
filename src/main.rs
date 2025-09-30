@@ -55,24 +55,24 @@ fn show_progression<P: AsRef<Path>>(
 
 fn generate_graph() -> Result<(), Box<dyn Error>> {
     let mut builder = GraphBuilder::new(1);
-    builder.add_dense_cluster(50, 0.95)?;
-    builder.add_dense_cluster(40, 0.8)?;
-    builder.add_dense_cluster(30, 0.75)?;
-    builder.add_dense_cluster(75, 0.6)?;
+    builder.add_dense_cluster(75, 0.5)?;
+    builder.add_dense_cluster(50, 0.35)?;
+    builder.add_dense_cluster(25, 0.2)?;
     builder.add_random_link(0, 1)?;
     builder.add_random_link(1, 2)?;
-    builder.add_random_link(2, 3)?;
-    builder.add_random_link(0, 3)?;
-    builder.finalize_graph().write_to_dot_file("tests/verifiers/medium_1.dot")
+    builder.add_random_link(0, 2)?;
+    builder.finalize_graph().write_to_dot_file("tests/verifiers/medium_3.dot")
 }
 
 fn progressions() -> Result<(), Box<dyn Error>> {
     let graphs = [
-        "tests/verifiers/tiny.dot",
-        "tests/verifiers/small_0.dot",
-        "tests/verifiers/small_1.dot",
-        "tests/verifiers/medium_0.dot",
-        "tests/verifiers/medium_1.dot",
+        // "tests/verifiers/tiny.dot",
+        // "tests/verifiers/small_0.dot",
+        // "tests/verifiers/small_1.dot",
+        // "tests/verifiers/medium_0.dot",
+        // "tests/verifiers/medium_1.dot",
+        // "tests/verifiers/medium_2.dot",
+        "tests/verifiers/medium_3.dot"
     ];
     let factors = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0];
 
