@@ -19,7 +19,7 @@ pub struct GraphBuilder {
     rng: StdRng
 }
 
-macro_rules! check_condition {
+macro_rules! guard {
     ($cond:expr, $($msg:expr),+) => {
         if !($cond) {
             return Err(format!($($msg),+).into());
@@ -49,8 +49,8 @@ impl GraphBuilder {
         edge_density: f64
     ) -> Result<usize, Box<dyn Error>> {
         // Perform some sanity checks
-        check_condition!(num_nodes > 0, "Cluster can't be empty");
-        check_condition!(
+        guard!(num_nodes > 0, "Cluster can't be empty");
+        guard!(
             (0.0..=1.0).contains(&edge_density),
             "Edge density must be between 0 and 1"
         );
@@ -91,7 +91,7 @@ impl GraphBuilder {
         num_nodes_b: usize
     ) -> Result<usize, Box<dyn Error>> {
         // Perform some sanity checks
-        check_condition!(
+        guard!(
             num_nodes_a > 0 && num_nodes_b > 0,
             "Cluster can't be empty"
         );
@@ -136,7 +136,7 @@ impl GraphBuilder {
         &mut self,
         num_nodes: usize
     ) -> Result<usize, Box<dyn Error>> {
-        check_condition!(num_nodes > 0, "Cluster can't be empty");
+        guard!(num_nodes > 0, "Cluster can't be empty");
 
         // Determine the ID for the new cluster
         let cluster_id = self.clusters.len();
@@ -174,16 +174,16 @@ impl GraphBuilder {
         mut cluster2_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
-        check_condition!(
+        guard!(
             cluster1_id != cluster2_id,
             "Links must be made between separate clusters"
         );
-        check_condition!(
+        guard!(
             cluster1_id < self.clusters.len(),
             "Cluster {} does not exist",
             cluster1_id
         );
-        check_condition!(
+        guard!(
             cluster2_id < self.clusters.len(),
             "Cluster {} does not exist",
             cluster2_id
@@ -205,7 +205,7 @@ impl GraphBuilder {
         let num_possible_links = cluster1_nodes.len() * cluster2_nodes.len();
 
         // Make sure there are links that can be made
-        check_condition!(
+        guard!(
             num_existing_links < num_possible_links,
             "All possible links between clusters {} and {} have been made",
             cluster1_id,
@@ -265,27 +265,27 @@ impl GraphBuilder {
         mut cluster2_node_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
-        check_condition!(
+        guard!(
             cluster1_id != cluster2_id,
             "Links must be made between separate clusters"
         );
-        check_condition!(
+        guard!(
             cluster1_id < self.clusters.len(),
             "Cluster {} does not exist",
             cluster1_id
         );
-        check_condition!(
+        guard!(
             cluster2_id < self.clusters.len(),
             "Cluster {} does not exist",
             cluster2_id
         );
-        check_condition!(
+        guard!(
             cluster1_node_id < self.clusters[cluster1_id].len(),
             "Cluster {} does not have node {}",
             cluster1_id,
             cluster1_node_id
         );
-        check_condition!(
+        guard!(
             cluster2_node_id < self.clusters[cluster2_id].len(),
             "Cluster {} does not have node {}",
             cluster2_id,
@@ -305,7 +305,7 @@ impl GraphBuilder {
             .and_then(|clusters| clusters.get(&cluster2_id))
             .map(|links| links.contains(&link))
             .unwrap_or(false);
-        check_condition!(!link_present, "The specified link already exists");
+        guard!(!link_present, "The specified link already exists");
 
         // Record the link and add it to the graph
         self.add_link_unchecked(
