@@ -28,9 +28,9 @@ mod autograph {
         fn from_dot_file(path: &str) -> PyResult<Self> {
             KnowledgeGraph::from_dot_file(path)
                 .map(|graph| KnowledgeGraphWrapper { graph })
-                .or_else(|e| {
-                    let error = format!("Error: {}", e.to_string());
-                    Err(PyErr::new::<PyIOError, _>(error))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyIOError, _>(error)
                 })
         }
 
@@ -78,9 +78,9 @@ mod autograph {
                 .as_mut()
                 .ok_or("Builder has been finalized and should not be used".into())
                 .and_then(|b| b.add_dense_cluster(num_nodes, edge_density))
-                .or_else(|e| {
-                    let error = format!("Error: {}", e.to_string());
-                    Err(PyErr::new::<PyValueError, _>(error))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyValueError, _>(error)
                 })
         }
 
@@ -93,9 +93,9 @@ mod autograph {
                 .as_mut()
                 .ok_or("Builder has been finalized and should not be used".into())
                 .and_then(|b| b.add_bipartite_cluster(num_nodes_a, num_nodes_b))
-                .or_else(|e| {
-                    let error = format!("Error: {}", e.to_string());
-                    Err(PyErr::new::<PyValueError, _>(error))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyValueError, _>(error)
                 })
         }
 
@@ -107,9 +107,9 @@ mod autograph {
                 .as_mut()
                 .ok_or("Builder has been finalized and should not be used".into())
                 .and_then(|b| b.add_circle_cluster(num_nodes))
-                .or_else(|e| {
-                    let error = format!("Error: {}", e.to_string());
-                    Err(PyErr::new::<PyValueError, _>(error))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyValueError, _>(error)
                 })
         }
 
@@ -122,9 +122,9 @@ mod autograph {
                 .as_mut()
                 .ok_or("Builder has been finalized and should not be used".into())
                 .and_then(|b| b.add_random_link(cluster1_id, cluster2_id))
-                .or_else(|e| {
-                    let error = format!("Error: {}", e.to_string());
-                    Err(PyErr::new::<PyValueError, _>(error))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyValueError, _>(error)
                 })
         }
 
@@ -141,9 +141,9 @@ mod autograph {
                 .and_then(|b| 
                     b.add_link(cluster1_id, cluster2_id, cluster1_node_id, cluster2_node_id)
                 )
-                .or_else(|e| {
-                    let error = format!("Error: {}", e.to_string());
-                    Err(PyErr::new::<PyValueError, _>(error))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyValueError, _>(error)
                 })
         }
 
@@ -156,9 +156,9 @@ mod autograph {
                 .take()
                 .ok_or("Builder has been finalized and should not be used")
                 .map(|graph| KnowledgeGraphWrapper { graph: graph.finalize_graph() })
-                .or_else(|e| {
-                    let error = format!("Error: {}", e.to_string());
-                    Err(PyErr::new::<PyValueError, _>(error))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyValueError, _>(error)
                 })
         }
     }

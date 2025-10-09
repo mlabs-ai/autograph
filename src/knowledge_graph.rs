@@ -181,6 +181,12 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 }
 
+impl<V: Ord> Default for KnowledgeGraph<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KnowledgeGraph<String> {
     /// Read the graph from the given dot file.
     pub fn from_dot_file<P>(path: P) -> Result<Self, Box<dyn Error>> 
