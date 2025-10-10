@@ -50,8 +50,8 @@ mod autograph {
             self.graph.as_matrix()
         }
 
-        fn cluster(&mut self, factor: f64) {
-            self.graph.cluster(factor);
+        fn cluster(&mut self, factor: f64) -> Vec<f64> {
+            self.graph.cluster(factor)
         }
     }
 

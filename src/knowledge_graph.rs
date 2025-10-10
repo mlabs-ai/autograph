@@ -104,7 +104,7 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster(&mut self, factor: f64) {
+    pub fn cluster(&mut self, factor: f64) -> Vec<f64> {
         // Get the weight per vertex
         let mut weights = vec![0.0; self.vertex_mapping.len()];
         for &(id1, id2) in &self.edges {
@@ -119,10 +119,12 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Get new mapping and apply it
         let mut new_mapping = vec![0; weights.len()];
-        for (new_idx, (old_idx, _)) in weights.into_iter().enumerate() {
+        for (new_idx, &(old_idx, _)) in weights.iter().enumerate() {
             new_mapping[old_idx] = new_idx;
         }
         self.remap_vertices(&new_mapping);
+
+        weights.into_iter().map(|(_, w)| w).collect()
     }
 
     /// Write the graph as a Graphviz dot file to the given path.
