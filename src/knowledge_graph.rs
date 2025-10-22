@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
@@ -104,12 +105,17 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster(&mut self, factor: f64) -> Vec<f64> {
+    pub fn cluster(&mut self, factor: f64) -> (Vec<f64>, Vec<f64>) {
         // Get the weight per vertex
         let mut weights = vec![0.0; self.vertex_mapping.len()];
+        let mut reverse_weights = vec![0.0; self.vertex_mapping.len()];
+
         for &(id1, id2) in &self.edges {
             weights[id1] += (-factor * id2 as f64).exp();
             weights[id2] += (-factor * id1 as f64).exp(); // TODO: Assumes undigraph
+
+            reverse_weights[id1] += ((id1 as f64 - id2 as f64) * factor).exp();
+            reverse_weights[id2] += ((id2 as f64 - id1 as f64) * factor).exp();
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
@@ -124,7 +130,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
         self.remap_vertices(&new_mapping);
 
-        weights.into_iter().map(|(_, w)| w).collect()
+        (weights.into_iter().map(|(_, w)| w).collect(), reverse_weights)
     }
 
     /// Write the graph as a Graphviz dot file to the given path.
@@ -169,14 +175,17 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Returns the graph as an adjacency matrix, in row major format.
-    pub fn as_matrix(&self) -> Vec<Vec<bool>> {
+    pub fn as_matrix(&self) -> Vec<Vec<usize>> {
         let num_verts = self.vertex_mapping.len();
-        let mut adj_mat = vec![vec![false; num_verts]; num_verts];
+        let num_bins = min(1000, num_verts);
+        let mut adj_mat = vec![vec![0; num_bins]; num_bins];
 
         // TODO: Assumes undirected graph
         for &(v1, v2) in &self.edges {
-            adj_mat[v1][v2] = true;
-            adj_mat[v2][v1] = true;
+            let v1 = v1 * num_bins / num_verts;
+            let v2 = v2 * num_bins / num_verts;
+            adj_mat[v1][v2] += 1;
+            adj_mat[v2][v1] += 1;
         }
 
         adj_mat
@@ -358,5 +367,38 @@ mod tests {
         let g2 = KnowledgeGraph::from_dot_file("tests/goldens/test.dot").unwrap();
 
         assert_eq!(g1, g2);
+    }
+
+    #[test]
+    fn adj_mat_small() {
+        let g: KnowledgeGraph<_> = [
+            ("v1", "v2"),
+            ("v1", "v3")
+        ].into_iter().collect();
+
+        let adj_mat = vec![
+            vec![0, 1, 1],
+            vec![1, 0, 0],
+            vec![1, 0, 0]
+        ];
+        assert_eq!(adj_mat, g.as_matrix());
+    }
+
+    #[test]
+    fn adj_mat_large() {
+        let mut g: KnowledgeGraph<_> = [
+            (0, 1),
+            (0, 2)
+        ].into_iter().collect();
+        for i in 3..2000 {
+            g.add_vertex(i);
+        }
+
+        let mut adj_mat = vec![vec![0;1000];1000];
+        adj_mat[0][0] = 2;
+        adj_mat[0][1] = 1;
+        adj_mat[1][0] = 1;
+
+        assert_eq!(adj_mat, g.as_matrix());
     }
 }

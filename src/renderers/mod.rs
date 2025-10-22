@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-pub mod adjacency_matrix_images;
 pub mod dot_files;
 
 pub trait StdRendererOutput {

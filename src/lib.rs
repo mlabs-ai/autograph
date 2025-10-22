@@ -46,11 +46,11 @@ mod autograph {
             self.graph.shuffle_vertex_ids(seed);
         }
 
-        fn as_matrix(&self) -> Vec<Vec<bool>> {
+        fn as_matrix(&self) -> Vec<Vec<usize>> {
             self.graph.as_matrix()
         }
 
-        fn cluster(&mut self, factor: f64) -> Vec<f64> {
+        fn cluster(&mut self, factor: f64) -> (Vec<f64>, Vec<f64>) {
             self.graph.cluster(factor)
         }
     }
