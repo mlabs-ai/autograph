@@ -90,9 +90,16 @@ impl<V: Ord> KnowledgeGraph<V> {
             *old_id = new_mapping[*old_id];
         }
 
-        for (old_src, old_dst) in self.edges.iter_mut() {
-            *old_src = new_mapping[*old_src];
-            *old_dst = new_mapping[*old_dst];
+        for (src, dst) in self.edges.iter_mut() {
+            *src = new_mapping[*src];
+            *dst = new_mapping[*dst];
+
+            // TODO: For determinism purposes, it helps to order these indices.
+            // This only works since the graph is unirected; once we add direction,
+            // this won't work.
+            if *dst < *src {
+                mem::swap(dst, src);
+            }
         }
     }
 
@@ -135,6 +142,18 @@ impl<V: Ord> KnowledgeGraph<V> {
         self.remap_vertices(&new_mapping);
 
         weights.into_iter().map(|(_, w)| w).collect()
+    }
+
+    pub fn split_density(&self) -> Vec<f64> {
+        let mut point_densities = vec![0.0; self.vertex_mapping.len()];
+        let mut upper_left = 0.0;
+        let mut upper_right = 0.0;
+        let mut lower_left = 0.0;
+        let mut lower_right = 0.0;
+
+
+
+        point_densities
     }
 
     /// Write the graph as a Graphviz dot file to the given path.
@@ -340,7 +359,7 @@ mod tests {
         assert_eq!(g.edges.len(), 2);
         assert_eq!(g.vertex_mapping.len(), 3);
         assert_eq!(g.edges[0], (1, 2));
-        assert_eq!(g.edges[1], (1, 0));
+        assert_eq!(g.edges[1], (0, 1));
     }
 
     #[test]
