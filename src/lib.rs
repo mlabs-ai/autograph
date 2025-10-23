@@ -42,6 +42,10 @@ mod autograph {
             }
         }
 
+        fn num_vertices(&self) -> usize {
+            self.graph.num_vertices()
+        }
+
         fn shuffle_vertex_ids(&mut self, seed: u64) {
             self.graph.shuffle_vertex_ids(seed);
         }
@@ -50,7 +54,7 @@ mod autograph {
             self.graph.as_matrix()
         }
 
-        fn cluster(&mut self, factor: f64) -> (Vec<f64>, Vec<f64>) {
+        fn cluster(&mut self, factor: f64) -> Vec<f64> {
             self.graph.cluster(factor)
         }
     }

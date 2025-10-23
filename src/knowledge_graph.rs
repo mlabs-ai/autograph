@@ -44,6 +44,11 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
     }
 
+    /// Returns the number of vertices in this graph.
+    pub fn num_vertices(&self) -> usize {
+        self.vertex_mapping.len()
+    }
+
     /// Adds the given vertex to the `vertex_mapping` if not already present.
     /// If it is already present, no vertex will be added. Either way, the 
     /// `usize` integer ID used to represent the vertex in edges will be
@@ -105,17 +110,16 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster(&mut self, factor: f64) -> (Vec<f64>, Vec<f64>) {
+    pub fn cluster(&mut self, factor: f64) -> Vec<f64> {
         // Get the weight per vertex
         let mut weights = vec![0.0; self.vertex_mapping.len()];
-        let mut reverse_weights = vec![0.0; self.vertex_mapping.len()];
 
         for &(id1, id2) in &self.edges {
             weights[id1] += (-factor * id2 as f64).exp();
             weights[id2] += (-factor * id1 as f64).exp(); // TODO: Assumes undigraph
 
-            reverse_weights[id1] += ((id1 as f64 - id2 as f64) * factor).exp();
-            reverse_weights[id2] += ((id2 as f64 - id1 as f64) * factor).exp();
+            // TODO: notes for if 0 case
+            //weights[id1] += (factor * (num_verts - id2) as f64).exp();
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
@@ -130,7 +134,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
         self.remap_vertices(&new_mapping);
 
-        (weights.into_iter().map(|(_, w)| w).collect(), reverse_weights)
+        weights.into_iter().map(|(_, w)| w).collect()
     }
 
     /// Write the graph as a Graphviz dot file to the given path.
