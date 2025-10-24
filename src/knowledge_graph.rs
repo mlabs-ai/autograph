@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::{create_dir_all, File};
@@ -145,13 +145,90 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     pub fn split_density(&self) -> Vec<f64> {
+        // TODO: `split_density` assumes undigraph
+
+        // Helper function to reduce code reuse
+        fn get_density_and_move_to_upper_left(
+            index: &mut usize,
+            upper_right: &mut HashMap<usize, usize>,
+            lower_left: &mut HashMap<usize, usize>,
+            num_verts: usize,
+            upper_left_count: &mut usize,
+            lower_right_count: &mut usize,
+            point_densities: &mut Vec<f64>
+        ) {
+            // Calculate density value
+            let upper_right_count: usize = upper_right.values().sum();
+            let lower_left_count: usize = lower_left.values().sum();
+            let in_verts = *index as f64 + 1.0;
+            let out_verts = num_verts as f64 - in_verts;
+            point_densities[*index] = 
+                *upper_left_count as f64 / in_verts.powi(2) +
+                *lower_right_count as f64 / out_verts.powi(2) -
+                upper_right_count as f64 / (in_verts * out_verts) -
+                lower_left_count as f64 / (in_verts * out_verts);
+
+            // Move to next index and move points to upper left
+            *index += 1;
+            *upper_left_count += upper_right.remove(&index).unwrap_or(0);
+            *upper_left_count += lower_left.remove(&index).unwrap_or(0);
+        }
+
         let mut point_densities = vec![0.0; self.vertex_mapping.len()];
-        let mut upper_left = 0.0;
-        let mut upper_right = 0.0;
-        let mut lower_left = 0.0;
-        let mut lower_right = 0.0;
+        let mut upper_left_count = 0;
+        let mut upper_right: HashMap<_, usize> = HashMap::new();
+        let mut lower_left: HashMap<_, usize> = HashMap::new();
+        let lower_right: BTreeSet<_> = self.edges.iter().cloned().collect();
+        let mut lower_right_count = lower_right
+            .iter()
+            .map(|(src, dst)| if src == dst { 1 } else { 2 })
+            .sum();
+        let total_edges = lower_right_count;
 
+        // Iterate through all edges in order from smallest src to greatest
+        let mut i = 0;
+        for (src, dst) in lower_right {
+            // Calculate density of split point
+            while i < src {
+                get_density_and_move_to_upper_left(
+                    &mut i, 
+                    &mut upper_right, 
+                    &mut lower_left, 
+                    self.vertex_mapping.len(), 
+                    &mut upper_left_count, 
+                    &mut lower_right_count, 
+                    &mut point_densities
+                );
+            }
 
+            // Move edge to upper left or "wings"
+            if src == dst {
+                lower_right_count -= 1;
+                upper_left_count += 1;
+            }
+            else {
+                lower_right_count -= 2;
+                *upper_right.entry(dst).or_default() += 1;
+                *lower_left.entry(dst).or_default() += 1;
+            }
+        }
+        
+        // Calculate remaining densities, if there are any
+        while i < self.vertex_mapping.len() - 1 {
+            get_density_and_move_to_upper_left(
+                &mut i,
+                &mut upper_right,
+                &mut lower_left,
+                self.vertex_mapping.len(),
+                &mut upper_left_count,
+                &mut lower_right_count,
+                &mut point_densities
+            );
+        }
+
+        // We can calculate last density at this point
+        point_densities[self.vertex_mapping.len() - 1] = 
+            total_edges as f64 / (self.vertex_mapping.len() as f64).powi(2);
 
         point_densities
     }
@@ -423,5 +500,89 @@ mod tests {
         adj_mat[1][0] = 1;
 
         assert_eq!(adj_mat, g.as_matrix());
+    }
+
+    #[test]
+    fn empty_density() {
+        let mut g = KnowledgeGraph::new();
+
+        g.add_vertex(0);
+        g.add_vertex(1);
+
+        assert_eq!(g.split_density(), vec![0.0; 2]);
+    }
+
+    fn feq(a: f64, b: f64, epsilon: f64) -> bool {
+        (a - b).abs() < epsilon
+    }
+
+    #[test]
+    fn one_edge_density() {
+        let mut g = KnowledgeGraph::new();
+
+        g.add_vertex(0);
+        g.add_vertex(1);
+        g.add_vertex(2);
+        g.add_edge(0, 0);
+
+        let density = g.split_density();
+
+        assert_eq!(density[0], 1.0);
+        assert_eq!(density[1], 0.25);
+        assert!(feq(density[2], 1.0 / 9.0, 1e-9));
+    }
+
+    #[test]
+    fn two_edge_density() {
+        let mut g = KnowledgeGraph::new();
+
+        g.add_vertex(0);
+        g.add_vertex(1);
+        g.add_vertex(2);
+        g.add_edge(0, 0);
+        g.add_edge(0, 1);
+
+        let density = g.split_density();
+
+        assert_eq!(density[0], 0.0);
+        assert_eq!(density[1], 0.75);
+        assert!(feq(density[2], 1.0 / 3.0, 1e-9));
+    }
+
+    #[test]
+    fn three_edge_density() {
+        let mut g = KnowledgeGraph::new();
+
+        g.add_vertex(0);
+        g.add_vertex(1);
+        g.add_vertex(2);
+        g.add_edge(0, 0);
+        g.add_edge(0, 1);
+        g.add_edge(1, 2);
+
+        let density = g.split_density();
+
+        assert_eq!(density[0], 0.5);
+        assert_eq!(density[1], -0.25);
+        assert!(feq(density[2], 5.0 / 9.0, 1e-9));
+    }
+
+    #[test]
+    fn four_edge_density() {
+        let mut g = KnowledgeGraph::new();
+
+        g.add_vertex(0);
+        g.add_vertex(1);
+        g.add_vertex(2);
+        g.add_edge(0, 0);
+        g.add_edge(0, 1);
+        g.add_edge(1, 2);
+        g.add_edge(2, 2);
+
+        let density = g.split_density();
+
+        assert_eq!(density[0], 0.75);
+        assert_eq!(density[1], 0.75);
+        assert!(feq(density[2], 2.0 / 3.0, 1e-9));
     }
 }

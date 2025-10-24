@@ -57,6 +57,10 @@ mod autograph {
         fn cluster(&mut self, factor: f64) -> Vec<f64> {
             self.graph.cluster(factor)
         }
+
+        fn split_density(&self) -> Vec<f64> {
+            self.graph.split_density()
+        }
     }
 
     #[pyclass(name = "GraphBuilder", subclass)]
