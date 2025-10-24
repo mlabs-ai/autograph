@@ -155,7 +155,7 @@ impl<V: Ord> KnowledgeGraph<V> {
             num_verts: usize,
             upper_left_count: &mut usize,
             lower_right_count: &mut usize,
-            point_densities: &mut Vec<f64>
+            point_densities: &mut [f64]
         ) {
             // Calculate density value
             let upper_right_count: usize = upper_right.values().sum();
@@ -170,8 +170,8 @@ impl<V: Ord> KnowledgeGraph<V> {
 
             // Move to next index and move points to upper left
             *index += 1;
-            *upper_left_count += upper_right.remove(&index).unwrap_or(0);
-            *upper_left_count += lower_left.remove(&index).unwrap_or(0);
+            *upper_left_count += upper_right.remove(index).unwrap_or(0);
+            *upper_left_count += lower_left.remove(index).unwrap_or(0);
         }
 
         let mut point_densities = vec![0.0; self.vertex_mapping.len()];
