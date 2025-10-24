@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::{create_dir_all, File};
@@ -178,7 +178,8 @@ impl<V: Ord> KnowledgeGraph<V> {
         let mut upper_left_count = 0;
         let mut upper_right: HashMap<_, usize> = HashMap::new();
         let mut lower_left: HashMap<_, usize> = HashMap::new();
-        let lower_right: BTreeSet<_> = self.edges.iter().cloned().collect();
+        let mut lower_right: Vec<_> = self.edges.iter().collect();
+        lower_right.sort_unstable();
         let mut lower_right_count = lower_right
             .iter()
             .map(|(src, dst)| if src == dst { 1 } else { 2 })
@@ -187,7 +188,7 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Iterate through all edges in order from smallest src to greatest
         let mut i = 0;
-        for (src, dst) in lower_right {
+        for &(src, dst) in lower_right {
             // Calculate density of split point
             while i < src {
                 get_density_and_move_to_upper_left(
