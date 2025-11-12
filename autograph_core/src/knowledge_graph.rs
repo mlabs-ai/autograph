@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::{create_dir_all, File};
@@ -150,16 +150,16 @@ impl<V: Ord> KnowledgeGraph<V> {
         // Helper function to reduce code reuse
         fn get_density_and_move_to_upper_left(
             index: &mut usize,
-            upper_right: &mut HashMap<usize, usize>,
-            lower_left: &mut HashMap<usize, usize>,
+            upper_right: &mut Vec<usize>,
+            lower_left: &mut Vec<usize>,
             num_verts: usize,
             upper_left_count: &mut usize,
             lower_right_count: &mut usize,
             point_densities: &mut [f64]
         ) {
             // Calculate density value
-            let upper_right_count: usize = upper_right.values().sum();
-            let lower_left_count: usize = lower_left.values().sum();
+            let upper_right_count: usize = upper_right[*index + 1..].iter().sum();
+            let lower_left_count: usize = lower_left[*index + 1..].iter().sum();
             let in_verts = *index as f64 + 1.0;
             let out_verts = num_verts as f64 - in_verts;
             point_densities[*index] = 
@@ -170,14 +170,14 @@ impl<V: Ord> KnowledgeGraph<V> {
 
             // Move to next index and move points to upper left
             *index += 1;
-            *upper_left_count += upper_right.remove(index).unwrap_or(0);
-            *upper_left_count += lower_left.remove(index).unwrap_or(0);
+            *upper_left_count += upper_right[*index];
+            *upper_left_count += lower_left[*index];
         }
 
         let mut point_densities = vec![0.0; self.vertex_mapping.len()];
         let mut upper_left_count = 0;
-        let mut upper_right: HashMap<_, usize> = HashMap::new();
-        let mut lower_left: HashMap<_, usize> = HashMap::new();
+        let mut upper_right: Vec<usize> = vec![0; self.vertex_mapping.len()];
+        let mut lower_left: Vec<usize> = vec![0; self.vertex_mapping.len()];
         let mut lower_right: Vec<_> = self.edges.iter().collect();
         lower_right.sort_unstable();
         let mut lower_right_count = lower_right
@@ -209,8 +209,8 @@ impl<V: Ord> KnowledgeGraph<V> {
             }
             else {
                 lower_right_count -= 2;
-                *upper_right.entry(dst).or_default() += 1;
-                *lower_left.entry(dst).or_default() += 1;
+                upper_right[dst] += 1;
+                lower_left[dst] += 1;
             }
         }
         
@@ -337,6 +337,15 @@ impl<V: Ord> FromIterator<(V, V)> for KnowledgeGraph<V> {
         }
 
         graph
+    }
+}
+
+impl<V: Ord> From<&KnowledgeGraph<V>> for KnowledgeGraph<usize> {
+    fn from(value: &KnowledgeGraph<V>) -> Self {
+        Self {
+            edges: value.edges.clone(),
+            vertex_mapping: value.vertex_mapping.values().cloned().enumerate().collect()
+        }
     }
 }
 

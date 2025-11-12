@@ -9,12 +9,13 @@ use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 
 /// `GraphBuilder` is a struct that allows one to easily construct a complex
-/// `KnowledgeGraph<String>`.
+/// `KnowledgeGraph<usize>`.
 pub struct GraphBuilder {
-    graph: KnowledgeGraph<String>,
-    clusters: Vec<Vec<String>>,
+    graph: KnowledgeGraph<usize>,
+    clusters: Vec<Vec<usize>>,
     links: HashMap<usize, HashMap<usize, HashSet<(usize, usize)>>>,
-    rng: StdRng
+    rng: StdRng,
+    num_nodes: usize
 }
 
 macro_rules! guard {
@@ -32,7 +33,8 @@ impl GraphBuilder {
             graph: KnowledgeGraph::new(),
             clusters: Vec::new(),
             links: HashMap::new(),
-            rng: StdRng::seed_from_u64(seed)
+            rng: StdRng::seed_from_u64(seed),
+            num_nodes: 0
         }
     }
 
@@ -58,9 +60,10 @@ impl GraphBuilder {
 
         // Create and name all nodes in this cluster
         let mut cluster_nodes = Vec::new();
-        for i in 0..num_nodes {
-            let node_id = format!("d{}_n{}", cluster_id, i);
-            cluster_nodes.push(node_id.clone());
+        for _ in 0..num_nodes {
+            let node_id = self.num_nodes;
+            self.num_nodes += 1;
+            cluster_nodes.push(node_id);
             self.graph.add_vertex(node_id);
         }
 
@@ -68,8 +71,8 @@ impl GraphBuilder {
         for i in 0..cluster_nodes.len() {
             for j in i + 1..cluster_nodes.len() {
                 if self.rng.random_bool(edge_density) {
-                    let v1 = cluster_nodes[i].clone();
-                    let v2 = cluster_nodes[j].clone();
+                    let v1 = cluster_nodes[i];
+                    let v2 = cluster_nodes[j];
                     self.graph.add_edge(v1, v2);
                 }
             }
@@ -102,24 +105,26 @@ impl GraphBuilder {
 
         // Create all nodes on side A
         let mut cluster_nodes_a = Vec::new();
-        for i in 0..num_nodes_a {
-            let node_id = format!("b{}_a_n{}", cluster_id, i);
-            cluster_nodes_a.push(node_id.clone());
+        for _ in 0..num_nodes_a {
+            let node_id = self.num_nodes;
+            self.num_nodes += 1;
+            cluster_nodes_a.push(node_id);
             self.graph.add_vertex(node_id);
         }
 
         // Create all nodes on side B
         let mut cluster_nodes_b = Vec::new();
-        for i in 0..num_nodes_b {
-            let node_id = format!("b{}_b_n{}", cluster_id, i);
-            cluster_nodes_b.push(node_id.clone());
+        for _ in 0..num_nodes_b {
+            let node_id = self.num_nodes;
+            self.num_nodes += 1;
+            cluster_nodes_b.push(node_id);
             self.graph.add_vertex(node_id);
         }
 
         // Create all edges
-        for v1 in &cluster_nodes_a {
-            for v2 in &cluster_nodes_b {
-                self.graph.add_edge(v1.clone(), v2.clone());
+        for &v1 in &cluster_nodes_a {
+            for &v2 in &cluster_nodes_b {
+                self.graph.add_edge(v1, v2);
             }
         }
 
@@ -144,9 +149,10 @@ impl GraphBuilder {
 
         // Create and name all nodes in this cluster
         let mut cluster_nodes = Vec::new();
-        for i in 0..num_nodes {
-            let node_id = format!("c{}_n{}", cluster_id, i);
-            cluster_nodes.push(node_id.clone());
+        for _ in 0..num_nodes {
+            let node_id = self.num_nodes;
+            self.num_nodes += 1;
+            cluster_nodes.push(node_id);
             self.graph.add_vertex(node_id);
         }
 
@@ -319,12 +325,12 @@ impl GraphBuilder {
     }
 
     /// Get the list of nodes in the specified cluster.
-    pub fn get_cluster(&self, cluster_id: usize) -> Option<&Vec<String>> {
+    pub fn get_cluster(&self, cluster_id: usize) -> Option<&Vec<usize>> {
         self.clusters.get(cluster_id)
     }
 
     /// Consume the builder and return the resulting `KnowledgeGraph<String>`.
-    pub fn finalize_graph(self) -> KnowledgeGraph<String> {
+    pub fn finalize_graph(self) -> KnowledgeGraph<usize> {
         self.graph
     }
 
@@ -368,9 +374,9 @@ mod tests {
             builder.add_dense_cluster(3, 1.0).unwrap();
 
             let graph: KnowledgeGraph<_> = [
-                ("d0_n0".to_owned(), "d0_n1".to_owned()),
-                ("d0_n0".to_owned(), "d0_n2".to_owned()),
-                ("d0_n1".to_owned(), "d0_n2".to_owned())
+                (0, 1),
+                (0, 2),
+                (1, 2)
             ].into_iter().collect();
 
             assert_eq!(graph, builder.finalize_graph());
@@ -384,9 +390,9 @@ mod tests {
             builder.add_dense_cluster(3, 0.0).unwrap();
 
             let mut graph = KnowledgeGraph::new();
-            graph.add_vertex("d0_n0".to_owned());
-            graph.add_vertex("d0_n1".to_owned());
-            graph.add_vertex("d0_n2".to_owned());
+            graph.add_vertex(0);
+            graph.add_vertex(1);
+            graph.add_vertex(2);
 
             assert_eq!(graph, builder.finalize_graph());
         }
@@ -398,9 +404,9 @@ mod tests {
         builder.add_circle_cluster(3).unwrap();
 
         let graph: KnowledgeGraph<_> = [
-            ("c0_n0".to_owned(), "c0_n1".to_owned()),
-            ("c0_n1".to_owned(), "c0_n2".to_owned()),
-            ("c0_n0".to_owned(), "c0_n2".to_owned())
+            (0, 1),
+            (1, 2),
+            (0, 2)
         ].into_iter().collect();
 
         assert_eq!(graph, builder.finalize_graph());
@@ -412,19 +418,19 @@ mod tests {
         builder.add_bipartite_cluster(3, 2).unwrap();
 
         let mut graph = KnowledgeGraph::new();
-        graph.add_vertex("b0_a_n0".to_owned());
-        graph.add_vertex("b0_a_n1".to_owned());
-        graph.add_vertex("b0_a_n2".to_owned());
-        graph.add_vertex("b0_b_n0".to_owned());
-        graph.add_vertex("b0_b_n1".to_owned());
+        graph.add_vertex(0);
+        graph.add_vertex(1);
+        graph.add_vertex(2);
+        graph.add_vertex(3);
+        graph.add_vertex(4);
 
         let edges = [
-            ("b0_a_n0".to_owned(), "b0_b_n0".to_owned()),
-            ("b0_a_n0".to_owned(), "b0_b_n1".to_owned()),
-            ("b0_a_n1".to_owned(), "b0_b_n0".to_owned()),
-            ("b0_a_n1".to_owned(), "b0_b_n1".to_owned()),
-            ("b0_a_n2".to_owned(), "b0_b_n0".to_owned()),
-            ("b0_a_n2".to_owned(), "b0_b_n1".to_owned()),
+            (0, 3),
+            (0, 4),
+            (1, 3),
+            (1, 4),
+            (2, 3),
+            (2, 4),
         ];
         for (v1, v2) in edges {
             graph.add_edge(v1, v2);
@@ -441,8 +447,8 @@ mod tests {
             builder.add_dense_cluster(2, 1.0).unwrap();
 
             let graph: KnowledgeGraph<_> = [
-                ("d0_n0".to_owned(), "d0_n1".to_owned()),
-                ("d1_n0".to_owned(), "d1_n1".to_owned()),
+                (0, 1),
+                (2, 3),
             ].into_iter().collect();
 
             assert_eq!(graph, builder.finalize_graph());
@@ -462,12 +468,12 @@ mod tests {
             assert!(builder.add_random_link(0, 1).is_err());
 
             let graph: KnowledgeGraph<_> = [
-                ("d0_n0".to_owned(), "d0_n1".to_owned()),
-                ("d1_n0".to_owned(), "d1_n1".to_owned()),
-                ("d0_n0".to_owned(), "d1_n0".to_owned()),
-                ("d0_n0".to_owned(), "d1_n1".to_owned()),
-                ("d0_n1".to_owned(), "d1_n0".to_owned()),
-                ("d0_n1".to_owned(), "d1_n1".to_owned())
+                (0, 1),
+                (2, 3),
+                (0, 2),
+                (0, 3),
+                (1, 2),
+                (1, 3)
             ].into_iter().collect();
 
             assert_eq!(graph, builder.finalize_graph());

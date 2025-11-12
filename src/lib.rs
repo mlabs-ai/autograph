@@ -8,7 +8,7 @@ mod autograph {
 
     #[pyclass(name = "KnowledgeGraph", subclass)]
     pub struct KnowledgeGraphWrapper {
-        graph: KnowledgeGraph<String>
+        graph: KnowledgeGraph<usize>
     }
 
     #[pymethods]
@@ -23,19 +23,14 @@ mod autograph {
         #[staticmethod]
         fn from_dot_file(path: &str) -> PyResult<Self> {
             KnowledgeGraph::from_dot_file(path)
-                .map(|graph| KnowledgeGraphWrapper { graph })
+                .map(|graph| {
+                    let graph: KnowledgeGraph<usize> = (&graph).into();
+                    KnowledgeGraphWrapper { graph }
+                })
                 .map_err(|e| {
                     let error = format!("Error: {}", e);
                     PyErr::new::<PyIOError, _>(error)
                 })
-        }
-
-        #[staticmethod]
-        fn from_edge_list(edge_list: Vec<(String, String)>) -> Self {
-            let graph: KnowledgeGraph<_> = edge_list.into_iter().collect();
-            Self {
-                graph
-            }
         }
 
         fn num_vertices(&self) -> usize {
@@ -151,7 +146,7 @@ mod autograph {
                 })
         }
 
-        fn get_cluster(&self, cluster_id: usize) -> Option<&Vec<String>> {
+        fn get_cluster(&self, cluster_id: usize) -> Option<&Vec<usize>> {
             self.builder.as_ref().and_then(|b| b.get_cluster(cluster_id))
         }
 
