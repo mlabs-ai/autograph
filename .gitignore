@@ -2,3 +2,4 @@
 /data/*
 !/data/.gitkeep
 /.venv
+autograph_core/target/

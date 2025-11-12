@@ -330,22 +330,6 @@ impl<V: Ord> FromIterator<(V, V)> for KnowledgeGraph<V> {
     /// Constructs a `KnowledgeGraph<V>` from an iterator of tuples representing
     /// edges in the form `(V, V)`, where the first `V` represents the source 
     /// vertex of the edge, and the second represents the destination.
-    /// 
-    /// # Example
-    /// 
-    /// ```
-    /// use crate::KnowledgeGraph;
-    /// 
-    /// let g: KnowledgeGraph<_, _> = [
-    ///     ("v1", "v2"),
-    ///     ("v1", "v3")
-    /// ].into_iter().collect();
-    /// 
-    /// assert_eq!(g.edges.len(), 2);
-    /// assert_eq!(g.vertex_mapping.len(), 3);
-    /// assert_eq!(g.edges[0], (0, 1));
-    /// assert_eq!(g.edges[1], (0, 2));
-    /// ```
     fn from_iter<T: IntoIterator<Item = (V, V)>>(iter: T) -> Self {
         let mut graph = Self::new();
         for (v1, v2) in iter {

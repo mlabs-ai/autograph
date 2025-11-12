@@ -1,14 +1,10 @@
-pub mod graph_builder;
-pub mod knowledge_graph;
-pub mod renderers;
-
 #[pyo3::pymodule]
 mod autograph {
     use pyo3::exceptions::{PyIOError, PyValueError};
     use pyo3::prelude::*;
 
-    use crate::graph_builder::GraphBuilder;
-    use crate::knowledge_graph::KnowledgeGraph;
+    use autograph_core::graph_builder::GraphBuilder;
+    use autograph_core::knowledge_graph::KnowledgeGraph;
 
     #[pyclass(name = "KnowledgeGraph", subclass)]
     pub struct KnowledgeGraphWrapper {

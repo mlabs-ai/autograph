@@ -1,7 +1,5 @@
 use crate::knowledge_graph::KnowledgeGraph;
 
-use itertools::Itertools;
-
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::mem;
@@ -67,12 +65,15 @@ impl GraphBuilder {
         }
 
         // Add edges probabilistically
-        cluster_nodes.iter()
-            .array_combinations()
-            .filter(|_| self.rng.random_bool(edge_density))
-            .for_each(|[v1, v2]| {
-                self.graph.add_edge(v1.clone(), v2.clone())
-            });
+        for i in 0..cluster_nodes.len() {
+            for j in i + 1..cluster_nodes.len() {
+                if self.rng.random_bool(edge_density) {
+                    let v1 = cluster_nodes[i].clone();
+                    let v2 = cluster_nodes[j].clone();
+                    self.graph.add_edge(v1, v2);
+                }
+            }
+        }
 
         // Record the cluster
         self.clusters.push(cluster_nodes);
