@@ -117,7 +117,7 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster(&mut self, factor: f64) -> Vec<f64> {
+    pub fn cluster_step(&mut self, factor: f64) -> Vec<f64> {
         // Get the weight per vertex
         let mut weights = vec![0.0; self.vertex_mapping.len()];
 
@@ -142,6 +142,35 @@ impl<V: Ord> KnowledgeGraph<V> {
         self.remap_vertices(&new_mapping);
 
         weights.into_iter().map(|(_, w)| w).collect()
+    }
+
+    pub fn cluster(&mut self, factor: f64, max_steps: usize) {
+        // Step 1: Split disconnected nodes from rest of graph
+        let mut last_connected = self.vertex_mapping.len() - 1;
+        let mut disconnected_nodes: HashSet<_> = (0..self.vertex_mapping.len()).collect();
+        for (v1, v2) in &self.edges {
+            disconnected_nodes.remove(v1);
+            disconnected_nodes.remove(v2);
+        }
+        if !disconnected_nodes.is_empty() {
+            let mut new_mapping: Vec<_> = (0..self.vertex_mapping.len()).collect();
+            for disconnected_node in disconnected_nodes {
+                new_mapping[disconnected_node] = last_connected;
+                new_mapping[last_connected] = disconnected_node;
+                last_connected -= 1;
+            }
+
+            self.remap_vertices(&new_mapping);
+        }
+
+        // Step 2: Do cluster steps
+        for _ in 0..max_steps {
+            let weights = self.cluster_step(factor);
+            let _log_weights: Vec<_> = weights
+                .into_iter()
+                .map(|w| w.log2())
+                .collect();
+        }
     }
 
     pub fn split_density(&self) -> Vec<f64> {

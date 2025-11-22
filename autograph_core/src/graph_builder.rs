@@ -4,9 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::mem;
 
+use rand::distr::Distribution;
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
+
+use rand_distr::weighted::WeightedTreeIndex;
 
 /// `GraphBuilder` is a struct that allows one to easily construct a complex
 /// `KnowledgeGraph<usize>`.
@@ -38,6 +41,90 @@ impl GraphBuilder {
         }
     }
 
+    pub fn add_scale_free_cluster(
+        &mut self, 
+        num_nodes: usize, 
+        new_edges: usize
+    ) -> Result<usize, Box<dyn Error>> {
+        // Perform some sanity checks
+        guard!(num_nodes > 0, "Cluster can't be empty");
+        guard!(new_edges > 0, "Number of new edges per step must be > 0");
+        guard!(
+            new_edges <= num_nodes,
+            "Number of new edges per step must be <= number of nodes in cluster"
+        );
+
+        // Determine the ID for the new cluster
+        let cluster_id = self.clusters.len();
+
+        // Initialize a graph with `new_edges` nodes
+        let mut cluster_nodes: Vec<_> = (0..new_edges)
+            .map(|_| self.add_node())
+            .collect();
+        let mut degrees = vec![0; cluster_nodes.len()];
+
+        // Seed the graph with edges so that each node has a possibility of 
+        // being chosen in the growth step. We only do this if
+        // `cluster_nodes.len() > 1' so that a self edge is prevented from being
+        // added (this creates an edge case that is dealt with later).
+        if cluster_nodes.len() > 1 {
+            for i in 0..cluster_nodes.len() {
+                if degrees[i] == 0 {
+                    let mut j = self.rng.random_range(0..new_edges-1);
+                    if j >= i {
+                        j = j + 1;
+                    }
+
+                    let node_a = cluster_nodes[i];
+                    let node_b = cluster_nodes[j];
+                    self.graph.add_edge(node_a, node_b);
+
+                    degrees[i] += 1;
+                    degrees[j] += 1;
+                }
+            }
+        }
+
+        // Perform a sanity check. If this fails, something is wrong with the
+        // algorithm, and we should fail catastrophically
+        assert!(
+            &degrees == &[0] || degrees.iter().all(|&d| d > 0),
+            "`degrees` had elements that were 0, but it had length > 1"
+        );
+
+        // For the remaining nodes, add with weighted probability
+        for _ in cluster_nodes.len()..num_nodes {
+            let new_node = self.add_node();
+
+            // If `new_edges == 1`, then on iteration 1, degrees will be `[0]`,
+            // causing an error. Detect and account for this edge case
+            let mut dist = if &degrees == &[0] {
+                WeightedTreeIndex::new(&[1])?
+            }
+            else {
+                WeightedTreeIndex::new(&degrees)?
+            };
+
+            // Connect the new node to `new_edges` nodes without repeated edges
+            for _ in 0..new_edges {
+                let other_node_index = dist.sample(&mut self.rng);
+                let other_node = cluster_nodes[other_node_index];
+
+                self.graph.add_edge(new_node, other_node);
+                degrees[other_node_index] += 1;
+                dist.update(other_node_index, 0)?;
+            }
+
+            cluster_nodes.push(new_node);
+            degrees.push(new_edges);
+        }
+
+        // Record the cluster
+        self.clusters.push(cluster_nodes);
+
+        Ok(cluster_id)
+    }
+
     /// Create a cluster. Each node has a probility `edge_density` of being
     /// connected to any other node in the cluster.
     /// 
@@ -61,10 +148,8 @@ impl GraphBuilder {
         // Create and name all nodes in this cluster
         let mut cluster_nodes = Vec::new();
         for _ in 0..num_nodes {
-            let node_id = self.num_nodes;
-            self.num_nodes += 1;
+            let node_id = self.add_node();
             cluster_nodes.push(node_id);
-            self.graph.add_vertex(node_id);
         }
 
         // Add edges probabilistically
@@ -106,19 +191,15 @@ impl GraphBuilder {
         // Create all nodes on side A
         let mut cluster_nodes_a = Vec::new();
         for _ in 0..num_nodes_a {
-            let node_id = self.num_nodes;
-            self.num_nodes += 1;
+            let node_id = self.add_node();
             cluster_nodes_a.push(node_id);
-            self.graph.add_vertex(node_id);
         }
 
         // Create all nodes on side B
         let mut cluster_nodes_b = Vec::new();
         for _ in 0..num_nodes_b {
-            let node_id = self.num_nodes;
-            self.num_nodes += 1;
+            let node_id = self.add_node();
             cluster_nodes_b.push(node_id);
-            self.graph.add_vertex(node_id);
         }
 
         // Create all edges
@@ -150,16 +231,14 @@ impl GraphBuilder {
         // Create and name all nodes in this cluster
         let mut cluster_nodes = Vec::new();
         for _ in 0..num_nodes {
-            let node_id = self.num_nodes;
-            self.num_nodes += 1;
+            let node_id = self.add_node();
             cluster_nodes.push(node_id);
-            self.graph.add_vertex(node_id);
         }
 
         // Add edges
         for i in 0..cluster_nodes.len() {
             let j = (i + 1) % cluster_nodes.len();
-            self.graph.add_edge(cluster_nodes[i].clone(), cluster_nodes[j].clone());
+            self.graph.add_edge(cluster_nodes[i], cluster_nodes[j]);
         }
 
         // Record the cluster
@@ -348,9 +427,16 @@ impl GraphBuilder {
             .insert((cluster1_node_id, cluster2_node_id));
 
         // Add it to the graph
-        let cluser1_node_name = &self.clusters[cluster1_id][cluster1_node_id];
-        let cluser2_node_name = &self.clusters[cluster2_id][cluster2_node_id];
-        self.graph.add_edge(cluser1_node_name.clone(), cluser2_node_name.clone());
+        let cluser1_node_name = self.clusters[cluster1_id][cluster1_node_id];
+        let cluser2_node_name = self.clusters[cluster2_id][cluster2_node_id];
+        self.graph.add_edge(cluser1_node_name, cluser2_node_name);
+    }
+
+    fn add_node(&mut self) -> usize {
+        let node_id = self.num_nodes;
+        self.num_nodes += 1;
+        self.graph.add_vertex(node_id);
+        node_id
     }
 }
 
@@ -365,6 +451,50 @@ mod tests {
         let graph = KnowledgeGraph::new();
 
         assert_eq!(graph, builder.finalize_graph());
+    }
+
+    #[test]
+    fn scale_free_one_new_edge() {
+        for seed in 0..10 {
+            let mut builder = GraphBuilder::new(seed);
+            builder.add_scale_free_cluster(2, 1).unwrap();
+
+            let graph: KnowledgeGraph<_> = [
+                (0, 1)
+            ].into_iter().collect();
+
+            assert_eq!(graph, builder.finalize_graph());
+        }
+    }
+
+    #[test]
+    fn scale_free_tiny() {
+        for seed in 0..10 {
+            let mut builder = GraphBuilder::new(seed);
+            builder.add_scale_free_cluster(2, 2).unwrap();
+
+            let graph: KnowledgeGraph<_> = [
+                (0, 1)
+            ].into_iter().collect();
+
+            assert_eq!(graph, builder.finalize_graph());
+        }
+    }
+
+    #[test]
+    fn scale_free_small() {
+        for seed in 0..10 {
+            let mut builder = GraphBuilder::new(seed);
+            builder.add_scale_free_cluster(3, 2).unwrap();
+
+            let graph: KnowledgeGraph<_> = [
+                (0, 1),
+                (1, 2),
+                (2, 0)
+            ].into_iter().collect();
+
+            assert_eq!(graph, builder.finalize_graph());
+        }
     }
 
     #[test]
@@ -488,6 +618,11 @@ mod tests {
         assert!(builder.add_dense_cluster(2, -0.1).is_err());
         assert!(builder.add_dense_cluster(0, 1.1).is_err());
         assert!(builder.add_dense_cluster(0, -0.1).is_err());
+
+        assert!(builder.add_scale_free_cluster(0, 0).is_err());
+        assert!(builder.add_scale_free_cluster(10, 0).is_err());
+        assert!(builder.add_scale_free_cluster(0, 10).is_err());
+        assert!(builder.add_scale_free_cluster(5, 10).is_err());
 
         assert!(builder.add_bipartite_cluster(2, 0).is_err());
         assert!(builder.add_bipartite_cluster(0, 2).is_err());

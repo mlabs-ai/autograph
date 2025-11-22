@@ -33,6 +33,13 @@ mod autograph {
                 })
         }
 
+        fn write_to_dot_file(&self, path: &str) -> PyResult<()> {
+            self.graph.write_to_dot_file(path).map_err(|e| {
+                let error = format!("Error: {}", e);
+                PyErr::new::<PyIOError, _>(error)
+            })
+        }
+
         fn num_vertices(&self) -> usize {
             self.graph.num_vertices()
         }
@@ -45,8 +52,8 @@ mod autograph {
             self.graph.as_matrix()
         }
 
-        fn cluster(&mut self, factor: f64) -> Vec<f64> {
-            self.graph.cluster(factor)
+        fn cluster_step(&mut self, factor: f64) -> Vec<f64> {
+            self.graph.cluster_step(factor)
         }
 
         fn split_density(&self) -> Vec<f64> {
@@ -66,6 +73,21 @@ mod autograph {
             Self {
                 builder: Some(GraphBuilder::new(seed))
             }
+        }
+
+        fn add_scale_free_cluster(
+            &mut self,
+            num_nodes: usize,
+            new_edges: usize
+        ) -> PyResult<usize> {
+            self.builder
+                .as_mut()
+                .ok_or("Builder has been finalized and should not be used".into())
+                .and_then(|b| b.add_scale_free_cluster(num_nodes, new_edges))
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyValueError, _>(error)
+                })
         }
 
         fn add_dense_cluster(
