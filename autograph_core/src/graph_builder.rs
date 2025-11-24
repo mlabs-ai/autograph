@@ -58,10 +58,12 @@ impl GraphBuilder {
         let cluster_id = self.clusters.len();
 
         // Initialize a graph with `new_edges` nodes
-        let mut cluster_nodes: Vec<_> = (0..new_edges)
-            .map(|_| self.add_node())
-            .collect();
-        let mut degrees = vec![0; cluster_nodes.len()];
+        let mut cluster_nodes = Vec::with_capacity(num_nodes);
+        let mut degrees = Vec::with_capacity(num_nodes);
+        for _ in 0..new_edges {
+            cluster_nodes.push(self.add_node());
+            degrees.push(0);
+        }
 
         // Seed the graph with edges so that each node has a possibility of 
         // being chosen in the growth step. We only do this if
