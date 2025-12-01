@@ -42,8 +42,8 @@ impl GraphBuilder {
     }
 
     pub fn add_scale_free_cluster(
-        &mut self, 
-        num_nodes: usize, 
+        &mut self,
+        num_nodes: usize,
         new_edges: usize
     ) -> Result<usize, Box<dyn Error>> {
         // Perform some sanity checks
@@ -54,9 +54,6 @@ impl GraphBuilder {
             "Number of new edges per step must be <= number of nodes in cluster"
         );
 
-        // Determine the ID for the new cluster
-        let cluster_id = self.clusters.len();
-
         // Initialize a graph with `new_edges` nodes
         let mut cluster_nodes = Vec::with_capacity(num_nodes);
         let mut degrees = Vec::with_capacity(num_nodes);
@@ -65,7 +62,7 @@ impl GraphBuilder {
             degrees.push(0);
         }
 
-        // Seed the graph with edges so that each node has a possibility of 
+        // Seed the graph with edges so that each node has a possibility of
         // being chosen in the growth step. We only do this if
         // `cluster_nodes.len() > 1' so that a self edge is prevented from being
         // added (this creates an edge case that is dealt with later).
@@ -74,7 +71,7 @@ impl GraphBuilder {
                 if degrees[i] == 0 {
                     let mut j = self.rng.random_range(0..new_edges-1);
                     if j >= i {
-                        j = j + 1;
+                        j += 1;
                     }
 
                     let node_a = cluster_nodes[i];
@@ -122,14 +119,12 @@ impl GraphBuilder {
         }
 
         // Record the cluster
-        self.clusters.push(cluster_nodes);
-
-        Ok(cluster_id)
+        Ok(self.add_cluster(cluster_nodes))
     }
 
     /// Create a cluster. Each node has a probility `edge_density` of being
     /// connected to any other node in the cluster.
-    /// 
+    ///
     /// Fails if `num_nodes` is 0 or `edge_density` is not in the range [0.0,
     /// 1.0].
     pub fn add_dense_cluster(
@@ -143,9 +138,6 @@ impl GraphBuilder {
             (0.0..=1.0).contains(&edge_density),
             "Edge density must be between 0 and 1"
         );
-
-        // Determine the ID for the new cluster
-        let cluster_id = self.clusters.len();
 
         // Create and name all nodes in this cluster
         let mut cluster_nodes = Vec::new();
@@ -166,15 +158,13 @@ impl GraphBuilder {
         }
 
         // Record the cluster
-        self.clusters.push(cluster_nodes);
-
-        Ok(cluster_id)
+        Ok(self.add_cluster(cluster_nodes))
     }
 
     /// Create a bipartite cluster. One side will have `num_nodes_a` nodes, while
     /// the other will have `num_nodes_b`. Each node on side a will be connected
     /// to every node on side b.
-    /// 
+    ///
     /// Fails if either `num_nodes_a` or `num_nodes_b` is 0.
     pub fn add_bipartite_cluster(
         &mut self,
@@ -186,9 +176,6 @@ impl GraphBuilder {
             num_nodes_a > 0 && num_nodes_b > 0,
             "Cluster can't be empty"
         );
-
-        // Determine the ID for the new cluster
-        let cluster_id = self.clusters.len();
 
         // Create all nodes on side A
         let mut cluster_nodes_a = Vec::new();
@@ -213,22 +200,17 @@ impl GraphBuilder {
 
         // Record the cluster
         cluster_nodes_a.append(&mut cluster_nodes_b);
-        self.clusters.push(cluster_nodes_a);
-
-        Ok(cluster_id)
+        Ok(self.add_cluster(cluster_nodes_a))
     }
 
     /// Create a cluster where all the nodes are connected in a ring structure.
-    /// 
+    ///
     /// Fails if `num_nodes` is 0.
     pub fn add_circle_cluster(
         &mut self,
         num_nodes: usize
     ) -> Result<usize, Box<dyn Error>> {
         guard!(num_nodes > 0, "Cluster can't be empty");
-
-        // Determine the ID for the new cluster
-        let cluster_id = self.clusters.len();
 
         // Create and name all nodes in this cluster
         let mut cluster_nodes = Vec::new();
@@ -244,14 +226,12 @@ impl GraphBuilder {
         }
 
         // Record the cluster
-        self.clusters.push(cluster_nodes);
-
-        Ok(cluster_id)
+        Ok(self.add_cluster(cluster_nodes))
     }
 
     /// Create a link between two clusters. The link will be randomly chosen from
     /// any two nodes that do not already have an edge.
-    /// 
+    ///
     /// Fails under any of the following cicumstances:
     /// - `cluster1_id` and `cluster2_id` are the same.
     /// - Either cluster does not already exist.
@@ -302,7 +282,7 @@ impl GraphBuilder {
 
         // Since we are not memoizing the list of remaining links between every
         // cluster, the fastest approach for finding a random link that can be
-        // added is to randomly choose new edges until we find one that has not 
+        // added is to randomly choose new edges until we find one that has not
         // been created. The other main approach of creating a list of links
         // that have not yet been created and randomly choosing from that is
         // only faster if the number of remaining links is precisely 1.
@@ -326,12 +306,12 @@ impl GraphBuilder {
                 break link_candidate;
             }
         };
-        
+
         // Record the link
         self.add_link_unchecked(
-            cluster1_id, 
-            cluster2_id, 
-            cluster1_node_id, 
+            cluster1_id,
+            cluster2_id,
+            cluster1_node_id,
             cluster2_node_id
         );
         Ok(())
@@ -339,7 +319,7 @@ impl GraphBuilder {
 
     /// Add a link between a specific node in one cluster and a specific node in
     /// another cluster.
-    /// 
+    ///
     /// Fails under any of the following cicumstances:
     /// - `cluster1_id` and `cluster2_id` are the same.
     /// - Either cluster does not already exist.
@@ -397,9 +377,9 @@ impl GraphBuilder {
 
         // Record the link and add it to the graph
         self.add_link_unchecked(
-            cluster1_id, 
-            cluster2_id, 
-            cluster1_node_id, 
+            cluster1_id,
+            cluster2_id,
+            cluster1_node_id,
             cluster2_node_id
         );
         Ok(())
@@ -439,6 +419,12 @@ impl GraphBuilder {
         self.num_nodes += 1;
         self.graph.add_vertex(node_id);
         node_id
+    }
+
+    fn add_cluster(&mut self, cluster: Vec<usize>) -> usize {
+        let cluster_id = self.clusters.len();
+        self.clusters.push(cluster);
+        cluster_id
     }
 }
 
