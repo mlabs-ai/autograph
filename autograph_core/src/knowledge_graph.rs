@@ -1,15 +1,22 @@
 use std::cmp::min;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::mem;
+use std::ops::{Range, RangeInclusive};
 use std::path::Path;
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
+
+enum ClusterStrength {
+    Strong,
+    Border,
+    Weak
+}
 
 /// `KnowledgeGraph` stores a sparse graph in an edge list format. For now, the
 /// graph will be undirected and uncolored -- these features will be added later.
@@ -23,7 +30,8 @@ use rand::seq::index::sample;
 #[derive(Eq, Debug)]
 pub struct KnowledgeGraph<V: Ord> {
     edges: Vec<(usize, usize)>,
-    vertex_mapping: BTreeMap<V, usize>
+    vertex_mapping: BTreeMap<V, usize>,
+    clusters: Vec<RangeInclusive<usize>>
 }
 
 impl<V: Ord> PartialEq for KnowledgeGraph<V> {
@@ -40,7 +48,8 @@ impl<V: Ord> KnowledgeGraph<V> {
     pub fn new() -> Self {
         Self {
             edges: Vec::new(),
-            vertex_mapping: BTreeMap::new()
+            vertex_mapping: BTreeMap::new(),
+            clusters: Vec::new()
         }
     }
 
@@ -85,14 +94,20 @@ impl<V: Ord> KnowledgeGraph<V> {
     /// Remaps the internal vertex IDs. The input slice `new_mapping` will have
     /// one entry per vertex. Each entry's index will correspond to the vertex's
     /// old ID, while the entry itself will correspond to the new ID.
-    pub fn remap_vertices(&mut self, new_mapping: &[usize]) {
+    pub fn remap_vertices(&mut self, new_mapping: &HashMap<usize, usize>) {
         for old_id in self.vertex_mapping.values_mut() {
-            *old_id = new_mapping[*old_id];
+            if let Some(&new_id) = new_mapping.get(old_id) {
+                *old_id = new_id;
+            }
         }
 
         for (src, dst) in self.edges.iter_mut() {
-            *src = new_mapping[*src];
-            *dst = new_mapping[*dst];
+            if let Some(&new_src) = new_mapping.get(src) {
+                *src = new_src;
+            }
+            if let Some(&new_dst) = new_mapping.get(dst) {
+                *dst = new_dst;
+            }
 
             // TODO: For determinism purposes, it helps to order these indices.
             // This only works since the graph is unirected; once we add direction,
@@ -111,19 +126,30 @@ impl<V: Ord> KnowledgeGraph<V> {
         let num_verts = self.vertex_mapping.len();
 
         let mut rng = StdRng::seed_from_u64(seed);
-        let new_mapping = sample(&mut rng, num_verts, num_verts).into_vec();
+        let new_mapping = sample(&mut rng, num_verts, num_verts)
+            .into_iter()
+            .enumerate()
+            .collect();
 
         self.remap_vertices(&new_mapping);
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster_step(&mut self, factor: f64) -> Vec<f64> {
+    pub fn cluster_step(&mut self, factor: f64, range: Range<usize>) -> Vec<f64> {
         // Get the weight per vertex
-        let mut weights = vec![0.0; self.vertex_mapping.len()];
+        let mut weights = vec![0.0; range.end - range.start];
 
         for &(id1, id2) in &self.edges {
+            if !range.contains(&id1) || !range.contains(&id2) {
+                continue;
+            }
+
+            let id1 = id1 - range.start;
+            let id2 = id2 - range.start;
+
+            // TODO: Assumes undigraph
             weights[id1] += (-factor * id2 as f64).exp();
-            weights[id2] += (-factor * id1 as f64).exp(); // TODO: Assumes undigraph
+            weights[id2] += (-factor * id1 as f64).exp();
 
             // TODO: notes for if 0 case
             //weights[id1] += (factor * (num_verts - id2) as f64).exp();
@@ -135,17 +161,32 @@ impl<V: Ord> KnowledgeGraph<V> {
         weights.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
 
         // Get new mapping and apply it
-        let mut new_mapping = vec![0; weights.len()];
-        for (new_idx, &(old_idx, _)) in weights.iter().enumerate() {
-            new_mapping[old_idx] = new_idx;
-        }
+        let new_mapping = weights.iter()
+            .enumerate()
+            .map(|(new, &(old, _))| (old + range.start, new + range.start))
+            .collect();
         self.remap_vertices(&new_mapping);
 
         weights.into_iter().map(|(_, w)| w).collect()
     }
 
-    pub fn cluster(&mut self, factor: f64, max_steps: usize) {
-        // Step 1: Split disconnected nodes from rest of graph
+    pub fn cluster(
+        &mut self,
+        factor: f64,
+        steps_before_subdivide: usize,
+        mut boundary_threshold: f64,
+        min_cluster_size: usize
+    ) {
+        // Perform sanity checks
+        assert!(self.vertex_mapping.len() > 0, "Cannot cluster an empty graph");
+        assert!(min_cluster_size > 0, "Min cluster size cannot be 0");
+
+        // Ensure boundary threshold is negative
+        if boundary_threshold > 0.0 {
+            boundary_threshold = -boundary_threshold;
+        }
+
+        // Step 0: Split disconnected nodes from rest of graph
         let mut last_connected = self.vertex_mapping.len() - 1;
         let mut disconnected_nodes: HashSet<_> = (0..self.vertex_mapping.len()).collect();
         for (v1, v2) in &self.edges {
@@ -153,24 +194,88 @@ impl<V: Ord> KnowledgeGraph<V> {
             disconnected_nodes.remove(v2);
         }
         if !disconnected_nodes.is_empty() {
-            let mut new_mapping: Vec<_> = (0..self.vertex_mapping.len()).collect();
+            let mut new_mapping = HashMap::new();
             for disconnected_node in disconnected_nodes {
-                new_mapping[disconnected_node] = last_connected;
-                new_mapping[last_connected] = disconnected_node;
+                new_mapping.insert(disconnected_node, last_connected);
+                new_mapping.insert(last_connected, disconnected_node);
+
+                self.clusters.push(last_connected..=last_connected);
                 last_connected -= 1;
             }
 
             self.remap_vertices(&new_mapping);
         }
 
-        // Step 2: Do cluster steps
-        for _ in 0..max_steps {
-            let weights = self.cluster_step(factor);
-            let _log_weights: Vec<_> = weights
-                .into_iter()
-                .map(|w| w.log2())
-                .collect();
+        // If not enough nodes remaining, return
+        let num_nodes = last_connected + 1;
+        if num_nodes <= min_cluster_size {
+            if num_nodes > 0 {
+                self.clusters.push(0..=last_connected);
+            }
         }
+
+        // Otherwise, continue to cluster
+        else {
+            self.cluster_worker(
+                0..num_nodes,
+                factor,
+                steps_before_subdivide,
+                boundary_threshold,
+                min_cluster_size
+            );
+        }
+    }
+
+    fn cluster_worker(
+        &mut self,
+        range: Range<usize>,
+        factor: f64,
+        steps_before_subdivide: usize,
+        boundary_threshold: f64,
+        min_cluster_size: usize
+    ) -> Vec<(Range<usize>, ClusterStrength)> {
+        assert!(
+            steps_before_subdivide >= 1, 
+            "Must perform at least one subdivision step"
+        );
+
+        // If the number of nodes is low, return that this is a weak cluster
+        if range.end - range.start <= min_cluster_size {
+            return vec![(range, ClusterStrength::Weak)];
+        }
+
+        // Step 1: Do some cluster steps
+        for _ in 0..steps_before_subdivide-1 {
+            self.cluster_step(factor, range.clone());
+        }
+
+        // Step 2: Do subdivision
+        let weights = self.cluster_step(factor, range);
+        let log_weights: Vec<_> = weights
+            .iter()
+            .take_while(|&&w| w > 0.0)
+            .map(|w| w.log2())
+            .collect();
+        let log_derivatives: Vec<_> = log_weights
+            .iter()
+            .zip(log_weights.iter().skip(1))
+            .map(|(a, b)| b - a)
+            .collect();
+
+        let mut clusters: Vec<Range<usize>> = Vec::new();
+        let mut curr_cluster = 0..min_cluster_size;
+        let mut curr_cluster_strength = 
+            if log_derivatives[min_cluster_size - 1] > boundary_threshold {
+                ClusterStrength::Strong
+            }
+            else {
+                ClusterStrength::Border
+            };
+        for d in log_derivatives.iter().skip(min_cluster_size - 1) {
+
+        }
+
+        vec![]
     }
 
     pub fn split_density(&self) -> Vec<f64> {
@@ -373,7 +478,8 @@ impl<V: Ord> From<&KnowledgeGraph<V>> for KnowledgeGraph<usize> {
     fn from(value: &KnowledgeGraph<V>) -> Self {
         Self {
             edges: value.edges.clone(),
-            vertex_mapping: value.vertex_mapping.values().cloned().enumerate().collect()
+            vertex_mapping: value.vertex_mapping.values().cloned().enumerate().collect(),
+            clusters: Vec::new()
         }
     }
 }
@@ -450,7 +556,11 @@ mod tests {
         assert_eq!(g.edges[0], (0, 1));
         assert_eq!(g.edges[1], (0, 2));
         
-        let remapping = vec![1, 2, 0];
+        let remapping = [
+            (0, 1),
+            (1, 2),
+            (2, 0)
+        ].into_iter().collect();
         g.remap_vertices(&remapping);
 
         assert_eq!(g.get_vertex_id(&"v1"), Some(1));

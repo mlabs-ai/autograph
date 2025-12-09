@@ -52,8 +52,13 @@ mod autograph {
             self.graph.as_matrix()
         }
 
-        fn cluster_step(&mut self, factor: f64) -> Vec<f64> {
-            self.graph.cluster_step(factor)
+        fn cluster_step(
+            &mut self,
+            factor: f64,
+            from_idx: usize, 
+            to_idx: usize
+        ) -> Vec<f64> {
+            self.graph.cluster_step(factor, from_idx..to_idx)
         }
 
         fn split_density(&self) -> Vec<f64> {
