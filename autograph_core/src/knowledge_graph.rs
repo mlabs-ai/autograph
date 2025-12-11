@@ -5,17 +5,32 @@ use std::fmt::Display;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::mem;
-use std::ops::{Range, RangeInclusive};
+use std::ops::{Range};
 use std::path::Path;
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
 
-enum ClusterStrength {
+#[derive(PartialEq)]
+enum ClusterType {
     Strong,
     Border,
     Weak
+}
+
+struct Cluster {
+    pub cluster_type: ClusterType,
+    pub range: Range<usize>
+}
+
+impl Cluster {
+    pub fn new(cluster_type: ClusterType, range: Range<usize>) -> Self {
+        Self {
+            cluster_type,
+            range
+        }
+    }
 }
 
 /// `KnowledgeGraph` stores a sparse graph in an edge list format. For now, the
@@ -31,7 +46,7 @@ enum ClusterStrength {
 pub struct KnowledgeGraph<V: Ord> {
     edges: Vec<(usize, usize)>,
     vertex_mapping: BTreeMap<V, usize>,
-    clusters: Vec<RangeInclusive<usize>>
+    clusters: Vec<Range<usize>>
 }
 
 impl<V: Ord> PartialEq for KnowledgeGraph<V> {
@@ -135,7 +150,7 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster_step(&mut self, factor: f64, range: Range<usize>) -> Vec<f64> {
+    pub fn cluster_step(&mut self, factor: f64, range: &Range<usize>) -> Vec<f64> {
         // Get the weight per vertex
         let mut weights = vec![0.0; range.end - range.start];
 
@@ -178,7 +193,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         min_cluster_size: usize
     ) {
         // Perform sanity checks
-        assert!(self.vertex_mapping.len() > 0, "Cannot cluster an empty graph");
+        assert!(!self.vertex_mapping.is_empty(), "Cannot cluster an empty graph");
         assert!(min_cluster_size > 0, "Min cluster size cannot be 0");
 
         // Ensure boundary threshold is negative
@@ -199,7 +214,7 @@ impl<V: Ord> KnowledgeGraph<V> {
                 new_mapping.insert(disconnected_node, last_connected);
                 new_mapping.insert(last_connected, disconnected_node);
 
-                self.clusters.push(last_connected..=last_connected);
+                self.clusters.push(last_connected..last_connected + 1);
                 last_connected -= 1;
             }
 
@@ -210,19 +225,109 @@ impl<V: Ord> KnowledgeGraph<V> {
         let num_nodes = last_connected + 1;
         if num_nodes <= min_cluster_size {
             if num_nodes > 0 {
-                self.clusters.push(0..=last_connected);
+                self.clusters.push(0..num_nodes);
             }
         }
 
         // Otherwise, continue to cluster
         else {
-            self.cluster_worker(
+            let clusters = self.cluster_worker(
                 0..num_nodes,
                 factor,
                 steps_before_subdivide,
                 boundary_threshold,
                 min_cluster_size
             );
+
+            // Get all strong cluster assignments
+            let mut cluster_assignments = BTreeMap::new();
+            let mut weak_clusters = Vec::new();
+            let mut num_clusters = 0;
+            for cluster in clusters {
+                match cluster.cluster_type {
+                    ClusterType::Strong => {
+                        for i in cluster.range {
+                            cluster_assignments.insert(i, num_clusters);
+                        }
+                        num_clusters += 1;
+                    },
+                    _ => {
+                        weak_clusters.push(cluster);
+                    }
+                }
+            }
+
+            // Identify each node that's not currently assigned a cluster
+            let mut weak_node_affinities: BTreeMap<usize, HashMap<usize, usize>> = 
+                weak_clusters
+                    .into_iter()
+                    .flat_map(|c| c.range)
+                    .map(|weak_node_id| (weak_node_id, HashMap::new()))
+                    .collect();
+
+            // While there are nodes not assigned to a cluster...
+            while !weak_node_affinities.is_empty() {
+                // ... identify which cluster each has the highest affinity with...
+                for (v1, v2) in &self.edges {
+                    // If v1 is unclustered, but v2 is, increase v1's affinity 
+                    // for v2's cluster
+                    if let Some(cluster_counts) = weak_node_affinities.get_mut(v1) && 
+                        let Some(cluster_id) = cluster_assignments.get(v2)
+                    {
+                        *cluster_counts.entry(*cluster_id).or_default() += 1;
+                    }
+
+                    // If v2 is unclustered, but v1 is, increase v2's affinity
+                    // for v1's cluster
+                    if let Some(cluster_counts) = weak_node_affinities.get_mut(v2) &&
+                        let Some(cluster_id) = cluster_assignments.get(v1)
+                    {
+                        *cluster_counts.entry(*cluster_id).or_default() += 1;
+                    }
+                }
+
+                // ... put each unclustered node into a cluster...
+                let mut new_weak_node_affinities = BTreeMap::new();
+                for (&node_id, counts) in &weak_node_affinities {
+                    // Identify which node had the highest count
+                    let cluster = counts.iter().max_by_key(|(_, c)| *c);
+                    if let Some((&cluster_id, _)) = cluster {
+                        cluster_assignments.insert(node_id, cluster_id);
+                    }
+                    else {
+                        new_weak_node_affinities.insert(node_id, HashMap::new());
+                    }
+                }
+
+                // ... and mark the unclustered nodes
+                weak_node_affinities = new_weak_node_affinities;
+            }
+
+            // Identify which nodes go in which cluster
+            let mut cluster_groupings: HashMap<usize, Vec<usize>> = HashMap::new();
+            for (node_id, cluster_id) in cluster_assignments {
+                cluster_groupings
+                    .entry(cluster_id)
+                    .or_default()
+                    .push(node_id);
+            }
+
+            // Get the new mapping and apply it
+            let remapping = cluster_groupings.values()
+                .flatten()
+                .copied()
+                .enumerate()
+                .map(|(new, old)| (old, new))
+                .collect();
+            self.remap_vertices(&remapping);
+
+            // Record clusters
+            let mut node_start = 0;
+            for cluster in cluster_groupings.values() {
+                let cluster_size = cluster.len();
+                self.clusters.push(node_start .. node_start + cluster_size);
+                node_start += cluster_size;
+            }
         }
     }
 
@@ -233,7 +338,9 @@ impl<V: Ord> KnowledgeGraph<V> {
         steps_before_subdivide: usize,
         boundary_threshold: f64,
         min_cluster_size: usize
-    ) -> Vec<(Range<usize>, ClusterStrength)> {
+    ) -> Vec<Cluster> {
+        println!("Running on {:?}", &range);
+        // Perform a sanity check
         assert!(
             steps_before_subdivide >= 1, 
             "Must perform at least one subdivision step"
@@ -241,16 +348,16 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // If the number of nodes is low, return that this is a weak cluster
         if range.end - range.start <= min_cluster_size {
-            return vec![(range, ClusterStrength::Weak)];
+            return vec![Cluster::new(ClusterType::Weak, range)];
         }
 
         // Step 1: Do some cluster steps
         for _ in 0..steps_before_subdivide-1 {
-            self.cluster_step(factor, range.clone());
+            self.cluster_step(factor, &range);
         }
 
-        // Step 2: Do subdivision
-        let weights = self.cluster_step(factor, range);
+        // Step 2: Get log weights
+        let weights = self.cluster_step(factor, &range);
         let log_weights: Vec<_> = weights
             .iter()
             .take_while(|&&w| w > 0.0)
@@ -262,20 +369,148 @@ impl<V: Ord> KnowledgeGraph<V> {
             .map(|(a, b)| b - a)
             .collect();
 
-        let mut clusters: Vec<Range<usize>> = Vec::new();
-        let mut curr_cluster = 0..min_cluster_size;
-        let mut curr_cluster_strength = 
-            if log_derivatives[min_cluster_size - 1] > boundary_threshold {
-                ClusterStrength::Strong
+        // Step 3: Differentiate strong and border clusters
+        let mut clusters: Vec<Cluster> = Vec::new();
+        let mut curr_cluster = 
+            if log_derivatives[0] > boundary_threshold {
+                Cluster::new(ClusterType::Strong, range.start..range.start+1)
             }
             else {
-                ClusterStrength::Border
+                Cluster::new(ClusterType::Border, range.start..range.start+1)
             };
-        for d in log_derivatives.iter().skip(min_cluster_size - 1) {
+        for (i, d) in log_derivatives.into_iter().enumerate() {
+            // `i` is the current derivative; the current node is offset by 1
+            let curr_node = i + 1 + range.start;
 
+            // Log derivative signals strong cluster
+            if d > boundary_threshold {
+                match curr_cluster.cluster_type {
+                    ClusterType::Strong => curr_cluster.range.end = curr_node + 1,
+                    ClusterType::Border => {
+                        clusters.push(curr_cluster);
+                        curr_cluster = Cluster::new(
+                            ClusterType::Strong, 
+                            curr_node .. curr_node+1
+                        )
+                    },
+                    ClusterType::Weak => 
+                        panic!("Found weak cluster when there shouldn't be one")
+                }
+            }
+
+            // Log derivative signals border
+            else {
+                match curr_cluster.cluster_type {
+                    ClusterType::Strong => {
+                        // Consider case where the current cluster is too small
+                        if curr_cluster.range.end - curr_cluster.range.start < min_cluster_size {
+                            // Convert to a Border cluster
+                            curr_cluster.cluster_type = ClusterType::Border;
+
+                            // See if we can merge with last cluster
+                            if clusters
+                                .last()
+                                .map(|lc| lc.cluster_type == ClusterType::Border)
+                                .unwrap_or(false)
+                            {
+                                let last_cluster = clusters.pop().unwrap();
+                                curr_cluster.range.start = last_cluster.range.start;
+                            }
+
+                            // Increment current cluster
+                            curr_cluster.range.end = curr_node + 1;
+                        }
+
+                        // Otherwise, store the old cluster and start new border
+                        else {
+                            clusters.push(curr_cluster);
+                            curr_cluster = Cluster::new(
+                                ClusterType::Border, 
+                                curr_node .. curr_node+1
+                            )
+                        }
+                    },
+                    ClusterType::Border => curr_cluster.range.end = curr_node + 1,
+                    ClusterType::Weak => 
+                        panic!("Found weak cluster when there shouldn't be one")
+                }
+            }
         }
 
-        vec![]
+        // Convert last cluster to a border if it's too small
+        if curr_cluster.cluster_type == ClusterType::Strong && 
+            curr_cluster.range.end - curr_cluster.range.start < min_cluster_size
+        {
+            curr_cluster.cluster_type = ClusterType::Border;
+
+            // See if we can merge with last cluster
+            if clusters
+                .last()
+                .map(|lc| lc.cluster_type == ClusterType::Border)
+                .unwrap_or(false)
+            {
+                let last_cluster = clusters.pop().unwrap();
+                curr_cluster.range.start = last_cluster.range.start;
+            }
+        }
+
+        // Add final cluster to the list of clusters
+        clusters.push(curr_cluster);
+
+        // Step 4: If we've considered all nodes and there is one strong cluster,
+        // we are done...
+        if log_weights.len() == weights.len() && 
+            clusters
+                .iter()
+                .filter(|c| c.cluster_type == ClusterType::Strong)
+                .count() == 1 
+        {
+            clusters
+        }
+
+        // ... otherwise, recurse on the first strong cluster and everything
+        // after the next border
+        else {
+            let mut final_clusters = Vec::new();
+            let mut found_strong = false;
+            for cluster in clusters {
+                match cluster.cluster_type {
+                    ClusterType::Border => final_clusters.push(cluster),
+                    ClusterType::Strong => {
+                        if !found_strong {
+                            let mut recurse_clusters = self.cluster_worker(
+                                cluster.range, 
+                                factor, 
+                                steps_before_subdivide, 
+                                boundary_threshold, 
+                                min_cluster_size
+                            );
+                            final_clusters.append(&mut recurse_clusters);
+                            found_strong = true;
+                        }
+                        else {
+                            break;
+                        }
+                    },
+                    ClusterType::Weak => 
+                        panic!("Found weak cluster when there shouldn't be one")
+                }
+            }
+
+            // Recurse on last portion of nodes
+            let last_cluster_end = final_clusters.last().unwrap().range.end;
+            let mut recurse_clusters = self.cluster_worker(
+                last_cluster_end..range.end, 
+                factor, 
+                steps_before_subdivide, 
+                boundary_threshold, 
+                min_cluster_size
+            );
+            final_clusters.append(&mut recurse_clusters);
+
+            final_clusters
+        }
+        
     }
 
     pub fn split_density(&self) -> Vec<f64> {
@@ -284,8 +519,8 @@ impl<V: Ord> KnowledgeGraph<V> {
         // Helper function to reduce code reuse
         fn get_density_and_move_to_upper_left(
             index: &mut usize,
-            upper_right: &mut Vec<usize>,
-            lower_left: &mut Vec<usize>,
+            upper_right: &mut [usize],
+            lower_left: &mut [usize],
             num_verts: usize,
             upper_left_count: &mut usize,
             lower_right_count: &mut usize,
@@ -424,6 +659,10 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
 
         adj_mat
+    }
+
+    pub fn get_clusters(&self) -> &Vec<Range<usize>> {
+        &self.clusters
     }
 }
 

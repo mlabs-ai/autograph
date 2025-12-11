@@ -87,7 +87,7 @@ impl GraphBuilder {
         // Perform a sanity check. If this fails, something is wrong with the
         // algorithm, and we should fail catastrophically
         assert!(
-            &degrees == &[0] || degrees.iter().all(|&d| d > 0),
+            degrees == [0] || degrees.iter().all(|&d| d > 0),
             "`degrees` had elements that were 0, but it had length > 1"
         );
 
@@ -97,8 +97,8 @@ impl GraphBuilder {
 
             // If `new_edges == 1`, then on iteration 1, degrees will be `[0]`,
             // causing an error. Detect and account for this edge case
-            let mut dist = if &degrees == &[0] {
-                WeightedTreeIndex::new(&[1])?
+            let mut dist = if degrees == [0] {
+                WeightedTreeIndex::new([1])?
             }
             else {
                 WeightedTreeIndex::new(&degrees)?
@@ -635,5 +635,24 @@ mod tests {
 
         builder.add_link(0, 1, 0, 0).unwrap();
         assert!(builder.add_link(0, 1, 0, 0).is_err());
+    }
+
+    //#[ignore]
+    #[test]
+    fn cluster() {
+        let mut builder = GraphBuilder::new(0);
+        builder.add_scale_free_cluster(10_000, 100).unwrap();
+        builder.add_scale_free_cluster(10_000, 150).unwrap();
+        builder.add_scale_free_cluster(10_000, 250).unwrap();
+        builder.add_scale_free_cluster(10_000, 50).unwrap();
+
+        for _ in 0..1000 {
+            builder.add_random_link(0, 1).unwrap();
+            builder.add_random_link(1, 2).unwrap();
+            builder.add_random_link(2, 3).unwrap();
+        }
+
+        let mut graph = builder.finalize_graph();
+        graph.cluster(0.001, 5, 0.1, 100);
     }
 }

@@ -58,11 +58,31 @@ mod autograph {
             from_idx: usize, 
             to_idx: usize
         ) -> Vec<f64> {
-            self.graph.cluster_step(factor, from_idx..to_idx)
+            let range = from_idx..to_idx;
+            self.graph.cluster_step(factor, &range)
+        }
+
+        fn cluster(
+            &mut self,
+            factor: f64,
+            steps_before_subdivide: usize,
+            boundary_threshold: f64,
+            min_cluster_size: usize
+        ) {
+            self.graph.cluster(
+                factor,
+                steps_before_subdivide,
+                boundary_threshold,
+                min_cluster_size
+            );
         }
 
         fn split_density(&self) -> Vec<f64> {
             self.graph.split_density()
+        }
+
+        fn get_clusters(&self) -> Vec<(usize, usize)> {
+            self.graph.get_clusters().iter().map(|r| (r.start, r.end)).collect()
         }
     }
 
