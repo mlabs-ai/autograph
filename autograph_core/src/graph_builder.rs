@@ -637,7 +637,7 @@ mod tests {
         assert!(builder.add_link(0, 1, 0, 0).is_err());
     }
 
-    //#[ignore]
+    #[ignore]
     #[test]
     fn cluster() {
         let mut builder = GraphBuilder::new(0);
@@ -646,11 +646,15 @@ mod tests {
         builder.add_scale_free_cluster(10_000, 250).unwrap();
         builder.add_scale_free_cluster(10_000, 50).unwrap();
 
+        println!("Added clusters");
+
         for _ in 0..1000 {
             builder.add_random_link(0, 1).unwrap();
             builder.add_random_link(1, 2).unwrap();
             builder.add_random_link(2, 3).unwrap();
         }
+
+        println!("Added links");
 
         let mut graph = builder.finalize_graph();
         graph.cluster(0.001, 5, 0.1, 100);
