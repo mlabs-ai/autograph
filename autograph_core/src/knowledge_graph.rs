@@ -12,13 +12,16 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
 
-#[derive(PartialEq)]
+use rayon::prelude::*;
+
+#[derive(Debug, PartialEq)]
 enum ClusterType {
     Strong,
     Border,
     Weak
 }
 
+#[derive(Debug)]
 struct Cluster {
     pub cluster_type: ClusterType,
     pub range: Range<usize>
@@ -162,22 +165,19 @@ impl<V: Ord> KnowledgeGraph<V> {
             let id1 = id1 - range.start;
             let id2 = id2 - range.start;
 
-            // TODO: Assumes undigraph
             weights[id1] += (-factor * id2 as f64).exp();
             weights[id2] += (-factor * id1 as f64).exp();
-
-            // TODO: notes for if 0 case
-            //weights[id1] += (factor * (num_verts - id2) as f64).exp();
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
         // so we can use an unstable sort to save memory
         let mut weights: Vec<_> = weights.into_iter().enumerate().collect();
-        weights.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        weights.par_sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
 
         // Get new mapping and apply it
         let new_mapping = weights.iter()
             .enumerate()
+            .filter(|(new, (old, _))| new != old)
             .map(|(new, &(old, _))| (old + range.start, new + range.start))
             .collect();
         self.remap_vertices(&new_mapping);
@@ -251,7 +251,12 @@ impl<V: Ord> KnowledgeGraph<V> {
                         }
                         num_clusters += 1;
                     },
-                    _ => {
+                    ClusterType::Border => {
+                        println!("Processing border cluster {:?}", cluster.range);
+                        weak_clusters.push(cluster);
+                    },
+                    ClusterType::Weak => {
+                        println!("Processing weak cluster {:?}", cluster.range);
                         weak_clusters.push(cluster);
                     }
                 }
@@ -304,22 +309,13 @@ impl<V: Ord> KnowledgeGraph<V> {
             }
 
             // Identify which nodes go in which cluster
-            let mut cluster_groupings: HashMap<usize, Vec<usize>> = HashMap::new();
+            let mut cluster_groupings: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
             for (node_id, cluster_id) in cluster_assignments {
                 cluster_groupings
                     .entry(cluster_id)
                     .or_default()
                     .push(node_id);
             }
-
-            // Get the new mapping and apply it
-            let remapping = cluster_groupings.values()
-                .flatten()
-                .copied()
-                .enumerate()
-                .map(|(new, old)| (old, new))
-                .collect();
-            self.remap_vertices(&remapping);
 
             // Record clusters
             let mut node_start = 0;
@@ -328,6 +324,15 @@ impl<V: Ord> KnowledgeGraph<V> {
                 self.clusters.push(node_start .. node_start + cluster_size);
                 node_start += cluster_size;
             }
+
+            // Get the new mapping and apply it
+            let remapping = cluster_groupings.into_values()
+                .flatten()
+                .enumerate()
+                .filter(|(new, old)| new != old)
+                .map(|(new, old)| (old, new))
+                .collect();
+            self.remap_vertices(&remapping);
         }
     }
 
@@ -369,6 +374,11 @@ impl<V: Ord> KnowledgeGraph<V> {
             .map(|(a, b)| b - a)
             .collect();
 
+        // If the number of log weights is low, return that this is a weak cluster
+        if log_weights.len() <= min_cluster_size {
+            return vec![Cluster::new(ClusterType::Weak, range)];
+        }
+
         // Step 3: Differentiate strong and border clusters
         let mut clusters: Vec<Cluster> = Vec::new();
         let mut curr_cluster = 
@@ -390,7 +400,7 @@ impl<V: Ord> KnowledgeGraph<V> {
                         clusters.push(curr_cluster);
                         curr_cluster = Cluster::new(
                             ClusterType::Strong, 
-                            curr_node .. curr_node+1
+                            curr_node..curr_node+1
                         )
                     },
                     ClusterType::Weak => 
@@ -426,7 +436,7 @@ impl<V: Ord> KnowledgeGraph<V> {
                             clusters.push(curr_cluster);
                             curr_cluster = Cluster::new(
                                 ClusterType::Border, 
-                                curr_node .. curr_node+1
+                                curr_node..curr_node+1
                             )
                         }
                     },
@@ -456,28 +466,27 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Add final cluster to the list of clusters
         clusters.push(curr_cluster);
+        println!("Cluster list: {:?}", clusters);
 
         // Step 4: If we've considered all nodes and there is one strong cluster,
         // we are done...
-        if log_weights.len() == weights.len() && 
-            clusters
-                .iter()
-                .filter(|c| c.cluster_type == ClusterType::Strong)
-                .count() == 1 
-        {
+        let num_strong_clusters = clusters
+            .iter()
+            .filter(|c| c.cluster_type == ClusterType::Strong)
+            .count();
+        if log_weights.len() == weights.len() && num_strong_clusters <= 1 {
             clusters
         }
 
-        // ... otherwise, recurse on the first strong cluster and everything
-        // after the next border
+        // ... otherwise, recurse on the strong clusters
         else {
             let mut final_clusters = Vec::new();
-            let mut found_strong = false;
+            let mut num_strong_seen = 0;
             for cluster in clusters {
                 match cluster.cluster_type {
                     ClusterType::Border => final_clusters.push(cluster),
                     ClusterType::Strong => {
-                        if !found_strong {
+                        if num_strong_clusters > 1 {
                             let mut recurse_clusters = self.cluster_worker(
                                 cluster.range, 
                                 factor, 
@@ -486,9 +495,13 @@ impl<V: Ord> KnowledgeGraph<V> {
                                 min_cluster_size
                             );
                             final_clusters.append(&mut recurse_clusters);
-                            found_strong = true;
                         }
                         else {
+                            final_clusters.push(cluster);
+                        }
+
+                        num_strong_seen += 1;
+                        if num_strong_seen >= num_strong_clusters - 1 {
                             break;
                         }
                     },
@@ -510,7 +523,6 @@ impl<V: Ord> KnowledgeGraph<V> {
 
             final_clusters
         }
-        
     }
 
     pub fn split_density(&self) -> Vec<f64> {
