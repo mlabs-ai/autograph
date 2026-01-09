@@ -8,7 +8,7 @@ mod autograph {
 
     #[pyclass(name = "KnowledgeGraph", subclass)]
     pub struct KnowledgeGraphWrapper {
-        graph: KnowledgeGraph<usize>
+        graph: KnowledgeGraph<String>
     }
 
     #[pymethods]
@@ -24,7 +24,18 @@ mod autograph {
         fn from_dot_file(path: &str) -> PyResult<Self> {
             KnowledgeGraph::from_dot_file(path)
                 .map(|graph| {
-                    let graph: KnowledgeGraph<usize> = (&graph).into();
+                    KnowledgeGraphWrapper { graph }
+                })
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyIOError, _>(error)
+                })
+        }
+
+        #[staticmethod]
+        fn from_wikidata(path: &str, relationship: &str) -> PyResult<Self> {
+            KnowledgeGraph::from_wikidata(path, relationship)
+                .map(|graph| {
                     KnowledgeGraphWrapper { graph }
                 })
                 .map_err(|e| {
@@ -77,12 +88,8 @@ mod autograph {
             );
         }
 
-        fn split_density(&self) -> Vec<f64> {
-            self.graph.split_density()
-        }
-
-        fn get_clusters(&self) -> Vec<(usize, usize)> {
-            self.graph.get_clusters().iter().map(|r| (r.start, r.end)).collect()
+        fn get_clusters(&self) -> Vec<Vec<String>> {
+            self.graph.get_clusters()
         }
     }
 
@@ -124,35 +131,6 @@ mod autograph {
                 .as_mut()
                 .ok_or("Builder has been finalized and should not be used".into())
                 .and_then(|b| b.add_dense_cluster(num_nodes, edge_density))
-                .map_err(|e| {
-                    let error = format!("Error: {}", e);
-                    PyErr::new::<PyValueError, _>(error)
-                })
-        }
-
-        fn add_bipartite_cluster(
-            &mut self,
-            num_nodes_a: usize,
-            num_nodes_b: usize
-        ) -> PyResult<usize> {
-            self.builder
-                .as_mut()
-                .ok_or("Builder has been finalized and should not be used".into())
-                .and_then(|b| b.add_bipartite_cluster(num_nodes_a, num_nodes_b))
-                .map_err(|e| {
-                    let error = format!("Error: {}", e);
-                    PyErr::new::<PyValueError, _>(error)
-                })
-        }
-
-        fn add_circle_cluster(
-            &mut self,
-            num_nodes: usize
-        ) -> PyResult<usize> {
-            self.builder
-                .as_mut()
-                .ok_or("Builder has been finalized and should not be used".into())
-                .and_then(|b| b.add_circle_cluster(num_nodes))
                 .map_err(|e| {
                     let error = format!("Error: {}", e);
                     PyErr::new::<PyValueError, _>(error)
@@ -201,7 +179,10 @@ mod autograph {
             self.builder
                 .take()
                 .ok_or("Builder has been finalized and should not be used")
-                .map(|graph| KnowledgeGraphWrapper { graph: graph.finalize_graph() })
+                .map(|graph| {
+                    let graph = graph.finalize_graph();
+                    KnowledgeGraphWrapper { graph: (&graph).into() }
+                })
                 .map_err(|e| {
                     let error = format!("Error: {}", e);
                     PyErr::new::<PyValueError, _>(error)

@@ -3,16 +3,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::{create_dir_all, File};
-use std::io::Write;
-use std::mem;
+use std::io::{BufRead, BufReader, Write};
 use std::ops::{Range};
 use std::path::Path;
+use std::sync::Mutex;
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
 
+use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
+use serde_json::Value;
 
 #[derive(Debug, PartialEq)]
 enum ClusterType {
@@ -96,15 +98,8 @@ impl<V: Ord> KnowledgeGraph<V> {
     /// Adds an edge to the graph. If any of the vertices on either side of the
     /// edge is not already in the graph, it will be added.
     pub fn add_edge(&mut self, v1: V, v2: V) {
-        let mut index1 = self.add_vertex(v1);
-        let mut index2 = self.add_vertex(v2);
-
-        // TODO: For determinism purposes, it helps to order these indices.
-        // This only works since the graph is unirected; once we add direction,
-        // this won't work.
-        if index2 < index1 {
-            mem::swap(&mut index1, &mut index2);
-        }
+        let index1 = self.add_vertex(v1);
+        let index2 = self.add_vertex(v2);
 
         self.edges.push((index1, index2));
     }
@@ -126,13 +121,6 @@ impl<V: Ord> KnowledgeGraph<V> {
             if let Some(&new_dst) = new_mapping.get(dst) {
                 *dst = new_dst;
             }
-
-            // TODO: For determinism purposes, it helps to order these indices.
-            // This only works since the graph is unirected; once we add direction,
-            // this won't work.
-            if *dst < *src {
-                mem::swap(dst, src);
-            }
         }
     }
 
@@ -153,20 +141,32 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster_step(&mut self, factor: f64, range: &Range<usize>) -> Vec<f64> {
+    pub fn cluster_step(
+        &mut self, 
+        factor: f64, 
+        range: &Range<usize>
+    ) -> Vec<f64> {
         // Get the weight per vertex
         let mut weights = vec![0.0; range.end - range.start];
 
+        let mut num_connections = 0;
         for &(id1, id2) in &self.edges {
             if !range.contains(&id1) || !range.contains(&id2) {
                 continue;
             }
+
+            num_connections += 1;
 
             let id1 = id1 - range.start;
             let id2 = id2 - range.start;
 
             weights[id1] += (-factor * id2 as f64).exp();
             weights[id2] += (-factor * id1 as f64).exp();
+        }
+
+        // If all weights are 0, stop early
+        if num_connections == 0 {
+            return weights;
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
@@ -231,12 +231,14 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Otherwise, continue to cluster
         else {
-            let clusters = self.cluster_worker(
+            let mut clusters = Vec::new();
+            self.cluster_worker(
                 0..num_nodes,
                 factor,
                 steps_before_subdivide,
                 boundary_threshold,
-                min_cluster_size
+                min_cluster_size,
+                &mut clusters
             );
 
             // Get all strong cluster assignments
@@ -252,11 +254,9 @@ impl<V: Ord> KnowledgeGraph<V> {
                         num_clusters += 1;
                     },
                     ClusterType::Border => {
-                        println!("Processing border cluster {:?}", cluster.range);
                         weak_clusters.push(cluster);
                     },
                     ClusterType::Weak => {
-                        println!("Processing weak cluster {:?}", cluster.range);
                         weak_clusters.push(cluster);
                     }
                 }
@@ -272,6 +272,8 @@ impl<V: Ord> KnowledgeGraph<V> {
 
             // While there are nodes not assigned to a cluster...
             while !weak_node_affinities.is_empty() {
+                println!("{} weak nodes to be processed...", weak_node_affinities.len());
+
                 // ... identify which cluster each has the highest affinity with...
                 for (v1, v2) in &self.edges {
                     // If v1 is unclustered, but v2 is, increase v1's affinity 
@@ -304,6 +306,14 @@ impl<V: Ord> KnowledgeGraph<V> {
                     }
                 }
 
+                // ... if no node could be put in a cluster, create a new one...
+                if new_weak_node_affinities.len() == weak_node_affinities.len() {
+                    let (&node_id, _) = new_weak_node_affinities.first_key_value().unwrap();
+                    new_weak_node_affinities.remove(&node_id);
+                    cluster_assignments.insert(node_id, num_clusters);
+                    num_clusters += 1;
+                }
+
                 // ... and mark the unclustered nodes
                 weak_node_affinities = new_weak_node_affinities;
             }
@@ -324,10 +334,15 @@ impl<V: Ord> KnowledgeGraph<V> {
                 self.clusters.push(node_start .. node_start + cluster_size);
                 node_start += cluster_size;
             }
+            for _ in weak_node_affinities.keys() {
+                self.clusters.push(node_start .. node_start + 1);
+                node_start += 1;
+            }
 
             // Get the new mapping and apply it
             let remapping = cluster_groupings.into_values()
                 .flatten()
+                .chain(weak_node_affinities.into_keys())
                 .enumerate()
                 .filter(|(new, old)| new != old)
                 .map(|(new, old)| (old, new))
@@ -342,9 +357,10 @@ impl<V: Ord> KnowledgeGraph<V> {
         factor: f64,
         steps_before_subdivide: usize,
         boundary_threshold: f64,
-        min_cluster_size: usize
-    ) -> Vec<Cluster> {
-        println!("Running on {:?}", &range);
+        min_cluster_size: usize,
+        accumulator: &mut Vec<Cluster>
+    ) {
+        println!("> Running on {:?}", &range);
         // Perform a sanity check
         assert!(
             steps_before_subdivide >= 1, 
@@ -353,16 +369,26 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // If the number of nodes is low, return that this is a weak cluster
         if range.end - range.start <= min_cluster_size {
-            return vec![Cluster::new(ClusterType::Weak, range)];
+            println!("\tSmall cluster; immediately skipping");
+            accumulator.push(Cluster::new(ClusterType::Weak, range));
+            return;
         }
 
         // Step 1: Do some cluster steps
-        for _ in 0..steps_before_subdivide-1 {
-            self.cluster_step(factor, &range);
+        let mut weights = Vec::new();
+        for _ in 0..steps_before_subdivide {
+            weights = self.cluster_step(factor, &range);
+
+            // If the number of connected vertices is low, return that this is a weak cluster
+            let num_connected = weights.iter().take_while(|&&w| w > 0.0).count();
+            if num_connected <= min_cluster_size {
+                println!("\tOnly {} connected nodes; skipping", num_connected);
+                accumulator.push(Cluster::new(ClusterType::Weak, range));
+                return;
+            }
         }
 
         // Step 2: Get log weights
-        let weights = self.cluster_step(factor, &range);
         let log_weights: Vec<_> = weights
             .iter()
             .take_while(|&&w| w > 0.0)
@@ -373,11 +399,6 @@ impl<V: Ord> KnowledgeGraph<V> {
             .zip(log_weights.iter().skip(1))
             .map(|(a, b)| b - a)
             .collect();
-
-        // If the number of log weights is low, return that this is a weak cluster
-        if log_weights.len() <= min_cluster_size {
-            return vec![Cluster::new(ClusterType::Weak, range)];
-        }
 
         // Step 3: Differentiate strong and border clusters
         let mut clusters: Vec<Cluster> = Vec::new();
@@ -466,7 +487,7 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Add final cluster to the list of clusters
         clusters.push(curr_cluster);
-        println!("Cluster list: {:?}", clusters);
+        println!("\tCluster list: {:?}", clusters);
 
         // Step 4: If we've considered all nodes and there is one strong cluster,
         // we are done...
@@ -475,33 +496,32 @@ impl<V: Ord> KnowledgeGraph<V> {
             .filter(|c| c.cluster_type == ClusterType::Strong)
             .count();
         if log_weights.len() == weights.len() && num_strong_clusters <= 1 {
-            clusters
+            accumulator.append(&mut clusters);
         }
 
         // ... otherwise, recurse on the strong clusters
         else {
-            let mut final_clusters = Vec::new();
             let mut num_strong_seen = 0;
             for cluster in clusters {
                 match cluster.cluster_type {
-                    ClusterType::Border => final_clusters.push(cluster),
+                    ClusterType::Border => accumulator.push(cluster),
                     ClusterType::Strong => {
                         if num_strong_clusters > 1 {
-                            let mut recurse_clusters = self.cluster_worker(
+                            self.cluster_worker(
                                 cluster.range, 
                                 factor, 
                                 steps_before_subdivide, 
                                 boundary_threshold, 
-                                min_cluster_size
+                                min_cluster_size,
+                                accumulator
                             );
-                            final_clusters.append(&mut recurse_clusters);
                         }
                         else {
-                            final_clusters.push(cluster);
+                            accumulator.push(cluster);
                         }
 
                         num_strong_seen += 1;
-                        if num_strong_seen >= num_strong_clusters - 1 {
+                        if num_strong_seen >= 1 {
                             break;
                         }
                     },
@@ -511,108 +531,16 @@ impl<V: Ord> KnowledgeGraph<V> {
             }
 
             // Recurse on last portion of nodes
-            let last_cluster_end = final_clusters.last().unwrap().range.end;
-            let mut recurse_clusters = self.cluster_worker(
+            let last_cluster_end = accumulator.last().unwrap().range.end;
+            self.cluster_worker(
                 last_cluster_end..range.end, 
                 factor, 
                 steps_before_subdivide, 
                 boundary_threshold, 
-                min_cluster_size
-            );
-            final_clusters.append(&mut recurse_clusters);
-
-            final_clusters
-        }
-    }
-
-    pub fn split_density(&self) -> Vec<f64> {
-        // TODO: `split_density` assumes undigraph
-
-        // Helper function to reduce code reuse
-        fn get_density_and_move_to_upper_left(
-            index: &mut usize,
-            upper_right: &mut [usize],
-            lower_left: &mut [usize],
-            num_verts: usize,
-            upper_left_count: &mut usize,
-            lower_right_count: &mut usize,
-            point_densities: &mut [f64]
-        ) {
-            // Calculate density value
-            let upper_right_count: usize = upper_right[*index + 1..].iter().sum();
-            let lower_left_count: usize = lower_left[*index + 1..].iter().sum();
-            let in_verts = *index as f64 + 1.0;
-            let out_verts = num_verts as f64 - in_verts;
-            point_densities[*index] = 
-                *upper_left_count as f64 / in_verts.powi(2) +
-                *lower_right_count as f64 / out_verts.powi(2) -
-                upper_right_count as f64 / (in_verts * out_verts) -
-                lower_left_count as f64 / (in_verts * out_verts);
-
-            // Move to next index and move points to upper left
-            *index += 1;
-            *upper_left_count += upper_right[*index];
-            *upper_left_count += lower_left[*index];
-        }
-
-        let mut point_densities = vec![0.0; self.vertex_mapping.len()];
-        let mut upper_left_count = 0;
-        let mut upper_right: Vec<usize> = vec![0; self.vertex_mapping.len()];
-        let mut lower_left: Vec<usize> = vec![0; self.vertex_mapping.len()];
-        let mut lower_right: Vec<_> = self.edges.iter().collect();
-        lower_right.sort_unstable();
-        let mut lower_right_count = lower_right
-            .iter()
-            .map(|(src, dst)| if src == dst { 1 } else { 2 })
-            .sum();
-        let total_edges = lower_right_count;
-
-        // Iterate through all edges in order from smallest src to greatest
-        let mut i = 0;
-        for &(src, dst) in lower_right {
-            // Calculate density of split point
-            while i < src {
-                get_density_and_move_to_upper_left(
-                    &mut i, 
-                    &mut upper_right, 
-                    &mut lower_left, 
-                    self.vertex_mapping.len(), 
-                    &mut upper_left_count, 
-                    &mut lower_right_count, 
-                    &mut point_densities
-                );
-            }
-
-            // Move edge to upper left or "wings"
-            if src == dst {
-                lower_right_count -= 1;
-                upper_left_count += 1;
-            }
-            else {
-                lower_right_count -= 2;
-                upper_right[dst] += 1;
-                lower_left[dst] += 1;
-            }
-        }
-        
-        // Calculate remaining densities, if there are any
-        while i < self.vertex_mapping.len() - 1 {
-            get_density_and_move_to_upper_left(
-                &mut i,
-                &mut upper_right,
-                &mut lower_left,
-                self.vertex_mapping.len(),
-                &mut upper_left_count,
-                &mut lower_right_count,
-                &mut point_densities
+                min_cluster_size,
+                accumulator
             );
         }
-
-        // We can calculate last density at this point
-        point_densities[self.vertex_mapping.len() - 1] = 
-            total_edges as f64 / (self.vertex_mapping.len() as f64).powi(2);
-
-        point_densities
     }
 
     /// Write the graph as a Graphviz dot file to the given path.
@@ -662,19 +590,28 @@ impl<V: Ord> KnowledgeGraph<V> {
         let num_bins = min(1000, num_verts);
         let mut adj_mat = vec![vec![0; num_bins]; num_bins];
 
-        // TODO: Assumes undirected graph
         for &(v1, v2) in &self.edges {
             let v1 = v1 * num_bins / num_verts;
             let v2 = v2 * num_bins / num_verts;
             adj_mat[v1][v2] += 1;
-            adj_mat[v2][v1] += 1;
         }
 
         adj_mat
     }
 
-    pub fn get_clusters(&self) -> &Vec<Range<usize>> {
-        &self.clusters
+    pub fn get_clusters(&self) -> Vec<Vec<V>>
+    where 
+        V: Clone
+    {
+        let id2label: BTreeMap<_, _> = self.vertex_mapping
+            .iter()
+            .map(|(v, &i)| (i, v.clone()))
+            .collect();
+
+        self.clusters
+            .iter()
+            .map(|c| c.clone().map(|i| id2label[&i].clone()).collect())
+            .collect()
     }
 }
 
@@ -695,7 +632,7 @@ impl KnowledgeGraph<String> {
         let can_graph = dot_parser::canonical::Graph::from(ast_graph);
 
         // Sort the vertices for determinism's sake
-        let mut vs: Vec<_> = can_graph.nodes.set.keys().collect();
+        let mut vs: Vec<_> = can_graph.nodes.set.into_keys().collect();
         vs.sort_unstable();
 
         // Convert the graph to this format
@@ -706,6 +643,52 @@ impl KnowledgeGraph<String> {
         for e in can_graph.edges.set {
             graph.add_edge(e.from, e.to);
         }
+
+        Ok(graph)
+    }
+
+    pub fn from_wikidata<P>(path: P, relationship: &str) -> Result<Self, Box<dyn Error>>
+    where 
+        P: AsRef<Path>
+    {
+        // Get a buffered file reader
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+
+        // Read graph in parallel
+        let graph: KnowledgeGraph<String> = reader.lines()
+            .par_bridge()
+            .filter_map(|line_result| line_result.ok())
+            .filter_map(|line| {
+                // Parse JSON portion of line
+                let start = line.find("{")?;
+                let end = line.rfind("}")?;
+                let json_string = &line[start..=end];
+                let json_object: Value = serde_json::from_str(json_string).ok()?;
+
+                // Get the src and dsts for the graph
+                let src = json_object.get("id")?.as_str()?.to_string();
+                let dsts: Vec<_> = json_object
+                    .get("claims")?
+                    .get(relationship)?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|v|
+                        v
+                            .get("mainsnak")?
+                            .get("datavalue")?
+                            .get("value")?
+                            .get("id")?
+                            .as_str()
+                            .map(|s| s.to_string())
+                    )
+                    .collect();
+
+                Some((src, dsts))
+            })
+            .map(|(src, dsts)| dsts.into_iter().map(move |dst| (src.clone(), dst)))
+            .flatten_iter()
+            .collect();
 
         Ok(graph)
     }
@@ -725,11 +708,48 @@ impl<V: Ord> FromIterator<(V, V)> for KnowledgeGraph<V> {
     }
 }
 
+impl<V: Ord + Send> FromParallelIterator<(V, V)> for KnowledgeGraph<V> {
+    fn from_par_iter<I>(par_iter: I) -> Self
+    where
+        I: IntoParallelIterator<Item = (V, V)>
+    {
+        let graph_mutex = Mutex::new(Self::new());
+
+        par_iter.into_par_iter()
+            .fold(Vec::new, |mut cache, edge| { cache.push(edge); cache })
+            .for_each(|cache| {
+                let mut graph = graph_mutex.lock().unwrap();
+                for (v1, v2) in cache {
+                    graph.add_edge(v1, v2);
+                }
+            });
+
+        graph_mutex.into_inner().unwrap()
+    }
+}
+
 impl<V: Ord> From<&KnowledgeGraph<V>> for KnowledgeGraph<usize> {
     fn from(value: &KnowledgeGraph<V>) -> Self {
         Self {
             edges: value.edges.clone(),
-            vertex_mapping: value.vertex_mapping.values().cloned().enumerate().collect(),
+            vertex_mapping: value.vertex_mapping
+                .values()
+                .cloned()
+                .enumerate()
+                .collect(),
+            clusters: Vec::new()
+        }
+    }
+}
+
+impl<V: Ord + Display> From<&KnowledgeGraph<V>> for KnowledgeGraph<String> {
+    fn from(value: &KnowledgeGraph<V>) -> Self {
+        Self {
+            edges: value.edges.clone(),
+            vertex_mapping: value.vertex_mapping
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
             clusters: Vec::new()
         }
     }
@@ -820,7 +840,7 @@ mod tests {
         assert_eq!(g.edges.len(), 2);
         assert_eq!(g.vertex_mapping.len(), 3);
         assert_eq!(g.edges[0], (1, 2));
-        assert_eq!(g.edges[1], (0, 1));
+        assert_eq!(g.edges[1], (1, 0));
     }
 
     #[test]
@@ -862,8 +882,8 @@ mod tests {
 
         let adj_mat = vec![
             vec![0, 1, 1],
-            vec![1, 0, 0],
-            vec![1, 0, 0]
+            vec![0, 0, 0],
+            vec![0, 0, 0]
         ];
         assert_eq!(adj_mat, g.as_matrix());
     }
@@ -872,7 +892,9 @@ mod tests {
     fn adj_mat_large() {
         let mut g: KnowledgeGraph<_> = [
             (0, 1),
-            (0, 2)
+            (1, 0),
+            (0, 2),
+            (3, 1)
         ].into_iter().collect();
         for i in 3..2000 {
             g.add_vertex(i);
@@ -884,89 +906,5 @@ mod tests {
         adj_mat[1][0] = 1;
 
         assert_eq!(adj_mat, g.as_matrix());
-    }
-
-    #[test]
-    fn empty_density() {
-        let mut g = KnowledgeGraph::new();
-
-        g.add_vertex(0);
-        g.add_vertex(1);
-
-        assert_eq!(g.split_density(), vec![0.0; 2]);
-    }
-
-    fn feq(a: f64, b: f64, epsilon: f64) -> bool {
-        (a - b).abs() < epsilon
-    }
-
-    #[test]
-    fn one_edge_density() {
-        let mut g = KnowledgeGraph::new();
-
-        g.add_vertex(0);
-        g.add_vertex(1);
-        g.add_vertex(2);
-        g.add_edge(0, 0);
-
-        let density = g.split_density();
-
-        assert_eq!(density[0], 1.0);
-        assert_eq!(density[1], 0.25);
-        assert!(feq(density[2], 1.0 / 9.0, 1e-9));
-    }
-
-    #[test]
-    fn two_edge_density() {
-        let mut g = KnowledgeGraph::new();
-
-        g.add_vertex(0);
-        g.add_vertex(1);
-        g.add_vertex(2);
-        g.add_edge(0, 0);
-        g.add_edge(0, 1);
-
-        let density = g.split_density();
-
-        assert_eq!(density[0], 0.0);
-        assert_eq!(density[1], 0.75);
-        assert!(feq(density[2], 1.0 / 3.0, 1e-9));
-    }
-
-    #[test]
-    fn three_edge_density() {
-        let mut g = KnowledgeGraph::new();
-
-        g.add_vertex(0);
-        g.add_vertex(1);
-        g.add_vertex(2);
-        g.add_edge(0, 0);
-        g.add_edge(0, 1);
-        g.add_edge(1, 2);
-
-        let density = g.split_density();
-
-        assert_eq!(density[0], 0.5);
-        assert_eq!(density[1], -0.25);
-        assert!(feq(density[2], 5.0 / 9.0, 1e-9));
-    }
-
-    #[test]
-    fn four_edge_density() {
-        let mut g = KnowledgeGraph::new();
-
-        g.add_vertex(0);
-        g.add_vertex(1);
-        g.add_vertex(2);
-        g.add_edge(0, 0);
-        g.add_edge(0, 1);
-        g.add_edge(1, 2);
-        g.add_edge(2, 2);
-
-        let density = g.split_density();
-
-        assert_eq!(density[0], 0.75);
-        assert_eq!(density[1], 0.75);
-        assert!(feq(density[2], 2.0 / 3.0, 1e-9));
     }
 }

@@ -2,12 +2,11 @@ use crate::knowledge_graph::KnowledgeGraph;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::mem;
 
 use rand::distr::Distribution;
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
-use rand::seq::IteratorRandom;
+use rand::seq::{IteratorRandom, SliceRandom};
 
 use rand_distr::weighted::WeightedTreeIndex;
 
@@ -67,7 +66,9 @@ impl GraphBuilder {
         // `cluster_nodes.len() > 1' so that a self edge is prevented from being
         // added (this creates an edge case that is dealt with later).
         if cluster_nodes.len() > 1 {
-            for i in 0..cluster_nodes.len() {
+            let mut start_nodes: Vec<_> = (0..cluster_nodes.len()).collect();
+            start_nodes.shuffle(&mut self.rng);
+            for i in start_nodes {
                 if degrees[i] == 0 {
                     let mut j = self.rng.random_range(0..new_edges-1);
                     if j >= i {
@@ -109,7 +110,13 @@ impl GraphBuilder {
                 let other_node_index = dist.sample(&mut self.rng);
                 let other_node = cluster_nodes[other_node_index];
 
-                self.graph.add_edge(new_node, other_node);
+                // Give the new edge a 50% probability of pointing one way or the other
+                if self.rng.random_bool(0.5) {
+                    self.graph.add_edge(new_node, other_node);
+                }
+                else {
+                    self.graph.add_edge(other_node, new_node);
+                }
                 degrees[other_node_index] += 1;
                 dist.update(other_node_index, 0)?;
             }
@@ -148,81 +155,13 @@ impl GraphBuilder {
 
         // Add edges probabilistically
         for i in 0..cluster_nodes.len() {
-            for j in i + 1..cluster_nodes.len() {
-                if self.rng.random_bool(edge_density) {
+            for j in 0..cluster_nodes.len() {
+                if i != j && self.rng.random_bool(edge_density) {
                     let v1 = cluster_nodes[i];
                     let v2 = cluster_nodes[j];
                     self.graph.add_edge(v1, v2);
                 }
             }
-        }
-
-        // Record the cluster
-        Ok(self.add_cluster(cluster_nodes))
-    }
-
-    /// Create a bipartite cluster. One side will have `num_nodes_a` nodes, while
-    /// the other will have `num_nodes_b`. Each node on side a will be connected
-    /// to every node on side b.
-    ///
-    /// Fails if either `num_nodes_a` or `num_nodes_b` is 0.
-    pub fn add_bipartite_cluster(
-        &mut self,
-        num_nodes_a: usize,
-        num_nodes_b: usize
-    ) -> Result<usize, Box<dyn Error>> {
-        // Perform some sanity checks
-        guard!(
-            num_nodes_a > 0 && num_nodes_b > 0,
-            "Cluster can't be empty"
-        );
-
-        // Create all nodes on side A
-        let mut cluster_nodes_a = Vec::new();
-        for _ in 0..num_nodes_a {
-            let node_id = self.add_node();
-            cluster_nodes_a.push(node_id);
-        }
-
-        // Create all nodes on side B
-        let mut cluster_nodes_b = Vec::new();
-        for _ in 0..num_nodes_b {
-            let node_id = self.add_node();
-            cluster_nodes_b.push(node_id);
-        }
-
-        // Create all edges
-        for &v1 in &cluster_nodes_a {
-            for &v2 in &cluster_nodes_b {
-                self.graph.add_edge(v1, v2);
-            }
-        }
-
-        // Record the cluster
-        cluster_nodes_a.append(&mut cluster_nodes_b);
-        Ok(self.add_cluster(cluster_nodes_a))
-    }
-
-    /// Create a cluster where all the nodes are connected in a ring structure.
-    ///
-    /// Fails if `num_nodes` is 0.
-    pub fn add_circle_cluster(
-        &mut self,
-        num_nodes: usize
-    ) -> Result<usize, Box<dyn Error>> {
-        guard!(num_nodes > 0, "Cluster can't be empty");
-
-        // Create and name all nodes in this cluster
-        let mut cluster_nodes = Vec::new();
-        for _ in 0..num_nodes {
-            let node_id = self.add_node();
-            cluster_nodes.push(node_id);
-        }
-
-        // Add edges
-        for i in 0..cluster_nodes.len() {
-            let j = (i + 1) % cluster_nodes.len();
-            self.graph.add_edge(cluster_nodes[i], cluster_nodes[j]);
         }
 
         // Record the cluster
@@ -238,8 +177,8 @@ impl GraphBuilder {
     /// - All possible links have already been created.
     pub fn add_random_link(
         &mut self,
-        mut cluster1_id: usize,
-        mut cluster2_id: usize
+        cluster1_id: usize,
+        cluster2_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
         guard!(
@@ -256,11 +195,6 @@ impl GraphBuilder {
             "Cluster {} does not exist",
             cluster2_id
         );
-
-        // Make sure c1 < c2
-        if cluster2_id < cluster1_id {
-            mem::swap(&mut cluster1_id, &mut cluster2_id);
-        }
 
         // Determine number of links present vs number of possible links
         let num_existing_links = self.links
@@ -327,10 +261,10 @@ impl GraphBuilder {
     /// - The specified link has already been created.
     pub fn add_link(
         &mut self,
-        mut cluster1_id: usize,
-        mut cluster2_id: usize,
-        mut cluster1_node_id: usize,
-        mut cluster2_node_id: usize
+        cluster1_id: usize,
+        cluster2_id: usize,
+        cluster1_node_id: usize,
+        cluster2_node_id: usize
     ) -> Result<(), Box<dyn Error>> {
         // Perform some sanity checks
         guard!(
@@ -359,12 +293,6 @@ impl GraphBuilder {
             cluster2_id,
             cluster2_node_id
         );
-
-        // Make sure c1 < c2
-        if cluster2_id < cluster1_id {
-            mem::swap(&mut cluster1_id, &mut cluster2_id);
-            mem::swap(&mut cluster1_node_id, &mut cluster2_node_id);
-        }
 
         // Determine if the link already exists
         let link = (cluster1_node_id, cluster2_node_id);
@@ -442,50 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn scale_free_one_new_edge() {
-        for seed in 0..10 {
-            let mut builder = GraphBuilder::new(seed);
-            builder.add_scale_free_cluster(2, 1).unwrap();
-
-            let graph: KnowledgeGraph<_> = [
-                (0, 1)
-            ].into_iter().collect();
-
-            assert_eq!(graph, builder.finalize_graph());
-        }
-    }
-
-    #[test]
-    fn scale_free_tiny() {
-        for seed in 0..10 {
-            let mut builder = GraphBuilder::new(seed);
-            builder.add_scale_free_cluster(2, 2).unwrap();
-
-            let graph: KnowledgeGraph<_> = [
-                (0, 1)
-            ].into_iter().collect();
-
-            assert_eq!(graph, builder.finalize_graph());
-        }
-    }
-
-    #[test]
-    fn scale_free_small() {
-        for seed in 0..10 {
-            let mut builder = GraphBuilder::new(seed);
-            builder.add_scale_free_cluster(3, 2).unwrap();
-
-            let graph: KnowledgeGraph<_> = [
-                (0, 1),
-                (1, 2),
-                (2, 0)
-            ].into_iter().collect();
-
-            assert_eq!(graph, builder.finalize_graph());
-        }
-    }
-
-    #[test]
     fn full_single_cluster() {
         for seed in 0..10 {
             let mut builder = GraphBuilder::new(seed);
@@ -494,7 +378,10 @@ mod tests {
             let graph: KnowledgeGraph<_> = [
                 (0, 1),
                 (0, 2),
-                (1, 2)
+                (1, 0),
+                (1, 2),
+                (2, 0),
+                (2, 1)
             ].into_iter().collect();
 
             assert_eq!(graph, builder.finalize_graph());
@@ -517,47 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn circle() {
-        let mut builder = GraphBuilder::new(0);
-        builder.add_circle_cluster(3).unwrap();
-
-        let graph: KnowledgeGraph<_> = [
-            (0, 1),
-            (1, 2),
-            (0, 2)
-        ].into_iter().collect();
-
-        assert_eq!(graph, builder.finalize_graph());
-    }
-
-    #[test]
-    fn bipartite() {
-        let mut builder = GraphBuilder::new(0);
-        builder.add_bipartite_cluster(3, 2).unwrap();
-
-        let mut graph = KnowledgeGraph::new();
-        graph.add_vertex(0);
-        graph.add_vertex(1);
-        graph.add_vertex(2);
-        graph.add_vertex(3);
-        graph.add_vertex(4);
-
-        let edges = [
-            (0, 3),
-            (0, 4),
-            (1, 3),
-            (1, 4),
-            (2, 3),
-            (2, 4),
-        ];
-        for (v1, v2) in edges {
-            graph.add_edge(v1, v2);
-        }
-
-        assert_eq!(graph, builder.finalize_graph());
-    }
-
-    #[test]
     fn full_two_clusters_unconnected() {
         for seed in 0..10 {
             let mut builder = GraphBuilder::new(seed);
@@ -566,7 +412,9 @@ mod tests {
 
             let graph: KnowledgeGraph<_> = [
                 (0, 1),
+                (1, 0),
                 (2, 3),
+                (3, 2)
             ].into_iter().collect();
 
             assert_eq!(graph, builder.finalize_graph());
@@ -587,7 +435,9 @@ mod tests {
 
             let graph: KnowledgeGraph<_> = [
                 (0, 1),
+                (1, 0),
                 (2, 3),
+                (3, 2),
                 (0, 2),
                 (0, 3),
                 (1, 2),
@@ -611,12 +461,6 @@ mod tests {
         assert!(builder.add_scale_free_cluster(10, 0).is_err());
         assert!(builder.add_scale_free_cluster(0, 10).is_err());
         assert!(builder.add_scale_free_cluster(5, 10).is_err());
-
-        assert!(builder.add_bipartite_cluster(2, 0).is_err());
-        assert!(builder.add_bipartite_cluster(0, 2).is_err());
-        assert!(builder.add_bipartite_cluster(0, 0).is_err());
-
-        assert!(builder.add_circle_cluster(0).is_err());
 
         assert!(builder.add_random_link(0, 0).is_err());
         assert!(builder.add_link(0, 0, 0, 0).is_err());
