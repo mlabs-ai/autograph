@@ -14,6 +14,7 @@ use rand::seq::index::sample;
 
 use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
+use regex::Regex;
 use serde_json::Value;
 
 #[derive(Debug, PartialEq)]
@@ -575,7 +576,7 @@ impl<V: Ord> KnowledgeGraph<V> {
             let v2 = id_to_vertex_mapping
                 .get(id2)
                 .ok_or("Graph contained an edge with an unindexed vertex")?;
-            file.write_fmt(format_args!("\t{} -- {}\n", v1, v2))?;
+            file.write_fmt(format_args!("\t{} -> {}\n", v1, v2))?;
         }
 
         // Write file footer
@@ -627,21 +628,37 @@ impl KnowledgeGraph<String> {
     where 
         P: AsRef<Path>
     {
-        // Read and parse graph
-        let ast_graph = dot_parser::ast::Graph::from_file(path)?;
-        let can_graph = dot_parser::canonical::Graph::from(ast_graph);
+        let edge_regex = Regex::new(r"^\s*([^\s\[]+)\s+(--|->)\s+([^\s\[]+)\s*$")?;
+        let node_regex = Regex::new(r"^\s*([^\s\[]+).*$")?;
+        let end_regex = Regex::new(r"^\s*\}\s*$")?;
 
-        // Sort the vertices for determinism's sake
-        let mut vs: Vec<_> = can_graph.nodes.set.into_keys().collect();
-        vs.sort_unstable();
+        let mut graph = KnowledgeGraph::new();
 
-        // Convert the graph to this format
-        let mut graph = Self::new();
-        for v in vs {
-            graph.add_vertex(v.to_string());
-        }
-        for e in can_graph.edges.set {
-            graph.add_edge(e.from, e.to);
+        let file = File::open(path)?;
+        let file = BufReader::new(file);
+        for line in file.lines().skip(1) {
+            // Skip empty lines
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if end_regex.is_match(&line) {
+                break;
+            }
+            else if let Some(edge_captures) = edge_regex.captures(&line) {
+                let from = edge_captures.get(1).unwrap().as_str().to_string();
+                let to = edge_captures.get(3).unwrap().as_str().to_string();
+                graph.add_edge(from, to);
+            }
+            else if let Some(node_captures) = node_regex.captures(&line) {
+                let node = node_captures.get(1).unwrap().as_str().to_string();
+                graph.add_vertex(node);
+            }
+            else {
+                panic!("Unrecognized pattern: {}", line);
+            }
         }
 
         Ok(graph)
