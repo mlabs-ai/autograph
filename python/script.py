@@ -9,7 +9,7 @@ graph = autograph.KnowledgeGraph.from_dot_file(f"../data/wikidata/{RELATIONSHIP}
 
 print("Clustering", flush=True)
 start_time = time.time()
-graph.cluster(0.001, 10, 0.25, 10)
+graph.cluster(0.0001, 5, 0.25, 10)
 cluster_time = time.time() - start_time
 
 print(f"Cluster time: {cluster_time:.3f}s", flush=True)

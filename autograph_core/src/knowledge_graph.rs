@@ -560,7 +560,7 @@ impl<V: Ord> KnowledgeGraph<V> {
             create_dir_all(parent_dir)?;
         }
         let mut file = File::create(path)?;
-        file.write_all(b"graph {\n")?;
+        file.write_all(b"digraph {\n")?;
 
         // Write vertex labels, ensuring they are sorted by ID
         for (v, id) in &self.vertex_mapping {
@@ -644,15 +644,15 @@ impl KnowledgeGraph<String> {
                 continue;
             }
 
-            if end_regex.is_match(&line) {
+            if end_regex.is_match(line) {
                 break;
             }
-            else if let Some(edge_captures) = edge_regex.captures(&line) {
+            else if let Some(edge_captures) = edge_regex.captures(line) {
                 let from = edge_captures.get(1).unwrap().as_str().to_string();
                 let to = edge_captures.get(3).unwrap().as_str().to_string();
                 graph.add_edge(from, to);
             }
-            else if let Some(node_captures) = node_regex.captures(&line) {
+            else if let Some(node_captures) = node_regex.captures(line) {
                 let node = node_captures.get(1).unwrap().as_str().to_string();
                 graph.add_vertex(node);
             }
@@ -701,9 +701,25 @@ impl KnowledgeGraph<String> {
                     )
                     .collect();
 
-                Some((src, dsts))
+                let name = json_object
+                    .get("labels")
+                    .and_then(|l| l.get("en"))
+                    .and_then(|e| e.get("value"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                Some((name, src, dsts))
             })
-            .map(|(src, dsts)| dsts.into_iter().map(move |dst| (src.clone(), dst)))
+            .map(|(name, src, dsts)| {
+                let src_clone = src.clone();
+                dsts
+                    .into_iter()
+                    .map(move |dst| GraphElement::Edge((src.clone(), dst)))
+                    .chain(name
+                        .map(|n| vec![GraphElement::Rename((src_clone, n))])
+                        .unwrap_or(vec![])
+                    )
+            })
             .flatten_iter()
             .collect();
 
@@ -725,23 +741,42 @@ impl<V: Ord> FromIterator<(V, V)> for KnowledgeGraph<V> {
     }
 }
 
-impl<V: Ord + Send> FromParallelIterator<(V, V)> for KnowledgeGraph<V> {
+enum GraphElement<V> {
+    Edge((V, V)),
+    Rename((V, V))
+}
+
+impl<V: Ord + Send> FromParallelIterator<GraphElement<V>> for KnowledgeGraph<V> {
     fn from_par_iter<I>(par_iter: I) -> Self
     where
-        I: IntoParallelIterator<Item = (V, V)>
+        I: IntoParallelIterator<Item = GraphElement<V>>
     {
         let graph_mutex = Mutex::new(Self::new());
+        let rename_mutex = Mutex::new(BTreeMap::new());
 
         par_iter.into_par_iter()
             .fold(Vec::new, |mut cache, edge| { cache.push(edge); cache })
             .for_each(|cache| {
                 let mut graph = graph_mutex.lock().unwrap();
-                for (v1, v2) in cache {
-                    graph.add_edge(v1, v2);
+                let mut rename = rename_mutex.lock().unwrap();
+                for element in cache {
+                    match element {
+                        GraphElement::Edge((v1, v2)) => graph.add_edge(v1, v2),
+                        GraphElement::Rename((orig, new)) => {
+                            rename.insert(orig, new);
+                        }
+                    }
                 }
             });
 
-        graph_mutex.into_inner().unwrap()
+        let mut graph = graph_mutex.into_inner().unwrap();
+        for (orig, new) in rename_mutex.into_inner().unwrap().into_iter() {
+            if let Some(id) = graph.vertex_mapping.remove(&orig) {
+                graph.vertex_mapping.insert(new, id);
+            }
+        }
+
+        graph
     }
 }
 
