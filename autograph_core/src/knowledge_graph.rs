@@ -74,9 +74,29 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
     }
 
+    /// Generates an edge list representation for this graph
+    pub fn edge_list(&self) -> Vec<(V, V)> 
+    where 
+        V: Clone
+    {
+        let id_to_name: HashMap<_, _> = self.vertex_mapping
+            .iter()
+            .map(|(v, &id)| (id, v))
+            .collect();
+
+        self.edges.iter()
+            .map(|(id1, id2)| (id_to_name[id1].clone(), id_to_name[id2].clone()))
+            .collect()
+    }
+
     /// Returns the number of vertices in this graph.
     pub fn num_vertices(&self) -> usize {
         self.vertex_mapping.len()
+    }
+
+    /// Returns the number of edges in this graph
+    pub fn num_edges(&self) -> usize {
+        self.edges.len()
     }
 
     /// Adds the given vertex to the `vertex_mapping` if not already present.

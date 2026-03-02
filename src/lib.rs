@@ -1,7 +1,7 @@
 #[pyo3::pymodule]
 mod autograph {
     use pyo3::exceptions::{PyIOError, PyValueError};
-    use pyo3::prelude::*;
+    use pyo3::{PyResult, prelude::*};
 
     use autograph_core::graph_builder::GraphBuilder;
     use autograph_core::knowledge_graph::KnowledgeGraph;
@@ -44,6 +44,10 @@ mod autograph {
                 })
         }
 
+        fn edge_list(&self) -> Vec<(String, String)> {
+            self.graph.edge_list()
+        }
+
         fn write_to_dot_file(&self, path: &str) -> PyResult<()> {
             self.graph.write_to_dot_file(path).map_err(|e| {
                 let error = format!("Error: {}", e);
@@ -53,6 +57,10 @@ mod autograph {
 
         fn num_vertices(&self) -> usize {
             self.graph.num_vertices()
+        }
+
+        fn num_edges(&self) -> usize {
+            self.graph.num_edges()
         }
 
         fn shuffle_vertex_ids(&mut self, seed: u64) {
