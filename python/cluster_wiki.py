@@ -2,7 +2,7 @@ from autograph import autograph
 import json
 import time
 
-RELATIONSHIP = "P31"
+RELATIONSHIP = "P171"
 
 print("Loading graph", flush=True)
 graph = autograph.KnowledgeGraph.from_dot_file(f"../data/wikidata/{RELATIONSHIP}.dot")
