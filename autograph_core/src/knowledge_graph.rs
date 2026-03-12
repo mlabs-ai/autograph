@@ -293,7 +293,7 @@ impl<V: Ord> KnowledgeGraph<V> {
 
             // While there are nodes not assigned to a cluster...
             while !weak_node_affinities.is_empty() {
-                println!("{} weak nodes to be processed...", weak_node_affinities.len());
+                // println!("{} weak nodes to be processed...", weak_node_affinities.len());
 
                 // ... identify which cluster each has the highest affinity with...
                 for (v1, v2) in &self.edges {
@@ -381,7 +381,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         min_cluster_size: usize,
         accumulator: &mut Vec<Cluster>
     ) {
-        println!("> Running on {:?}", &range);
+        // println!("> Running on {:?}", &range);
         // Perform a sanity check
         assert!(
             steps_before_subdivide >= 1, 
@@ -390,7 +390,7 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // If the number of nodes is low, return that this is a weak cluster
         if range.end - range.start <= min_cluster_size {
-            println!("\tSmall cluster; immediately skipping");
+            // println!("\tSmall cluster; immediately skipping");
             accumulator.push(Cluster::new(ClusterType::Weak, range));
             return;
         }
@@ -403,7 +403,7 @@ impl<V: Ord> KnowledgeGraph<V> {
             // If the number of connected vertices is low, return that this is a weak cluster
             let num_connected = weights.iter().take_while(|&&w| w > 0.0).count();
             if num_connected <= min_cluster_size {
-                println!("\tOnly {} connected nodes; skipping", num_connected);
+                // println!("\tOnly {} connected nodes; skipping", num_connected);
                 accumulator.push(Cluster::new(ClusterType::Weak, range));
                 return;
             }
@@ -508,7 +508,7 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Add final cluster to the list of clusters
         clusters.push(curr_cluster);
-        println!("\tCluster list: {:?}", clusters);
+        // println!("\tCluster list: {:?}", clusters);
 
         // Step 4: If we've considered all nodes and there is one strong cluster,
         // we are done...

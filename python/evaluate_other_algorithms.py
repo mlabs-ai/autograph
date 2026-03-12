@@ -1,7 +1,10 @@
 from autograph import autograph
 import igraph
+import json
 import random
 from sklearn.metrics import adjusted_rand_score
+import time
+import matplotlib.pyplot as plt
 
 def experiment_step(
     num_clusters: int,
@@ -49,46 +52,92 @@ def experiment_step(
         nodes.add(v1)
         nodes.add(v2)
     nodes = list(nodes)
+    nodes.sort(key=lambda s: int(s))
     ig_graph.add_vertices(nodes)
     ig_graph.add_edges(edges)
 
-    # Calculate communities using different methods
-    print("Calculating clusters using Louvain method")
-    louvain_clusters = ig_graph.community_multilevel().membership
-    print("Calculating clusters using Newman Girvan method")
-    newman_girvan_clusters = ig_graph.community_edge_betweenness().as_clustering().membership
-    print("Calculating clusters using random walk method")
-    random_walk_clusters = ig_graph.community_walktrap().as_clustering().membership
-    print("Calculating clusters using eigenvector method")
-    eigenvector_clusters = ig_graph.community_leading_eigenvector().membership
-
     # Run our clustering algorithm
     print("Calculating clusters using Autograph")
-    graph.cluster(0.01, 5, 0.1, 50)
+    starttime = time.time()
+    graph.cluster(0.01, 5, 0.1, 10)
     autograph_clusters = [0] * len(true_cluster_ids)
     for i, cluster in enumerate(graph.get_clusters()):
         for node_id in cluster:
             node_id = int(node_id)
             autograph_clusters[node_id] = i
+    autograph_time = time.time() - starttime
+
+    # Calculate communities using different methods
+    print("Calculating clusters using eigenvector method")
+    starttime = time.time()
+    eigenvector_clusters = ig_graph.community_leading_eigenvector().membership
+    eigenvector_time = time.time() - starttime
+    
+    print("Calculating clusters using Louvain method")
+    starttime = time.time()
+    louvain_clusters = ig_graph.community_multilevel().membership
+    louvain_time = time.time() - starttime
+
+    print("Calculating clusters using Leiden method")
+    starttime = time.time()
+    leiden_clusters = ig_graph.community_leiden().membership
+    leiden_time = time.time() - starttime
+
+    print("Calculating clusters using random walk method")
+    starttime = time.time()
+    random_walk_clusters = ig_graph.community_walktrap().as_clustering().membership
+    random_walk_time = time.time() - starttime
+
+    print("Calculating clusters using fast greedy method")
+    starttime = time.time()
+    fast_greedy_clusters = ig_graph.community_fastgreedy().as_clustering().membership
+    fast_greedy_time = time.time() - starttime
+
+    print("Calculating clusters using walktrap method")
+    starttime = time.time()
+    walktrap_clusters = ig_graph.community_walktrap().as_clustering().membership
+    walktrap_time = time.time() - starttime
+
+    print("Calculating clusters using infomap method")
+    starttime = time.time()
+    infomap_clusters = ig_graph.community_walktrap().as_clustering().membership
+    infomap_time = time.time() - starttime
 
     # Calculate distance scores
     scores = {
+        "autograph": adjusted_rand_score(true_cluster_ids, autograph_clusters),
+        "autograph_time": autograph_time,
         "louvain": adjusted_rand_score(true_cluster_ids, louvain_clusters),
-        "newman_girvan": adjusted_rand_score(true_cluster_ids, newman_girvan_clusters),
+        "louvain_time": louvain_time,
+        "leiden": adjusted_rand_score(true_cluster_ids, leiden_clusters),
+        "leiden_time": leiden_time,
         "random_walk": adjusted_rand_score(true_cluster_ids, random_walk_clusters),
+        "random_walk_time": random_walk_time,
         "eigenvector": adjusted_rand_score(true_cluster_ids, eigenvector_clusters),
-        "autograph": adjusted_rand_score(true_cluster_ids, autograph_clusters)
+        "eigenvector_time": eigenvector_time,
+        "fast_greedy": adjusted_rand_score(true_cluster_ids, fast_greedy_clusters),
+        "fast_greedy_time": fast_greedy_time,
+        "walktrap": adjusted_rand_score(true_cluster_ids, walktrap_clusters),
+        "walktrap_time": walktrap_time,
+        "infomap_greedy": adjusted_rand_score(true_cluster_ids, infomap_clusters),
+        "infomap_time": infomap_time
     }
     return scores
 
 if __name__ == "__main__":
     total_scores = {}
-
-    for i in range(25):
-        run_scores = experiment_step(10, 1000, 10_000, 0.01, 0.1, i)
-        for k, v in run_scores.items():
-            total_scores.setdefault(k, [])
-            total_scores[k].append(v)
+    offset = 0
+    i = 0
+    while i < 25:
+        print(f"Iteration {i + 1}/25")
+        try:
+            run_scores = experiment_step(1000, 20, 200, 0.7, 0.1, i + offset)
+            for k, v in run_scores.items():
+                total_scores.setdefault(k, [])
+                total_scores[k].append(v)
+            i += 1
+        except:
+            offset += 1
 
     average_scores = {k: sum(v) / len(v) for k, v in total_scores.items()}
-    print(average_scores)
+    print(json.dumps(average_scores, indent=4))
