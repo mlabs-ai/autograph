@@ -120,7 +120,9 @@ def experiment_step(
         "walktrap": adjusted_rand_score(true_cluster_ids, walktrap_clusters),
         "walktrap_time": walktrap_time,
         "infomap_greedy": adjusted_rand_score(true_cluster_ids, infomap_clusters),
-        "infomap_time": infomap_time
+        "infomap_time": infomap_time,
+        "num_vertices": graph.num_vertices(),
+        "num_edges": graph.num_edges()
     }
     return scores
 
