@@ -13,7 +13,10 @@ def main(
     you want to evaluate (e.g., "P171" or "P31"), and a path to the desired
     output location.
     """
-    graph = autograph.KnowledgeGraph.from_wikidata(wikidata_json_file, relationship)
+    if wikidata_json_file.endswith(".bz2"):
+        graph = autograph.KnowledgeGraph.from_wikidata_bz2(wikidata_json_file, relationship)
+    else:
+        graph = autograph.KnowledgeGraph.from_wikidata(wikidata_json_file, relationship)
     graph.write_to_dot_file(output_file)
 
 if __name__ == "__main__":

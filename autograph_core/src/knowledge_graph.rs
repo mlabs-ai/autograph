@@ -987,12 +987,17 @@ mod tests {
     /// Reads just the head of the full bzip2-compressed Wikidata dump and checks
     /// that streaming decompression produces a non-empty graph for the
     /// "instance of" (P31) relationship. Capping the read keeps this fast enough
-    /// to run as part of the normal test suite.
+    /// to run as part of the normal test suite. Skipped when the dump is absent.
     #[test]
     fn from_wikidata_bz2() {
-        let g =
-            KnowledgeGraph::from_wikidata_bz2_limited("../data/latest-all.json.bz2", "P31", 500)
-                .expect("failed to parse bz2-compressed Wikidata dump");
+        let path = "../data/wikidata/latest-all.json.bz2";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipping: {} not found", path);
+            return;
+        }
+
+        let g = KnowledgeGraph::from_wikidata_bz2_limited(path, "P31", 500)
+            .expect("failed to parse bz2-compressed Wikidata dump");
 
         assert!(g.num_vertices() > 0, "expected at least one vertex");
         assert!(g.num_edges() > 0, "expected at least one edge");
