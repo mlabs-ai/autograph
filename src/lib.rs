@@ -40,6 +40,16 @@ mod autograph {
                 })
         }
 
+        #[staticmethod]
+        fn from_wikidata_bz2(path: &str, relationship: &str) -> PyResult<Self> {
+            KnowledgeGraph::from_wikidata_bz2(path, relationship)
+                .map(|graph| KnowledgeGraphWrapper { graph })
+                .map_err(|e| {
+                    let error = format!("Error: {}", e);
+                    PyErr::new::<PyIOError, _>(error)
+                })
+        }
+
         fn edge_list(&self) -> Vec<(String, String)> {
             self.graph.edge_list()
         }
