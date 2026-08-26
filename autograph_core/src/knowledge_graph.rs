@@ -669,7 +669,7 @@ impl KnowledgeGraph<String> {
         // Get a buffered file reader
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        Self::from_wikidata_reader(reader, relationship)
+        Self::from_wikidata_reader(reader, relationship, None)
     }
 
     /// Constructs a `KnowledgeGraph` from a bzip2-compressed Wikidata dump.
@@ -683,18 +683,45 @@ impl KnowledgeGraph<String> {
         let file = File::open(path)?;
         let decoder = bzip2::read::BzDecoder::new(file);
         let reader = BufReader::new(decoder);
-        Self::from_wikidata_reader(reader, relationship)
+        Self::from_wikidata_reader(reader, relationship, None)
+    }
+
+    /// Like `from_wikidata_bz2`, but stops after reading at most `limit`
+    /// entities, so callers can cheaply sample the head of a large dump.
+    pub fn from_wikidata_bz2_limited<P>(
+        path: P,
+        relationship: &str,
+        limit: usize,
+    ) -> Result<Self, Box<dyn Error>>
+    where
+        P: AsRef<Path>,
+    {
+        let file = File::open(path)?;
+        let decoder = bzip2::read::BzDecoder::new(file);
+        let reader = BufReader::new(decoder);
+        Self::from_wikidata_reader(reader, relationship, Some(limit))
     }
 
     /// Shared parsing logic for Wikidata dumps, operating over any buffered
     /// reader (whether it wraps a plain file or a decompression stream).
-    fn from_wikidata_reader<R>(reader: R, relationship: &str) -> Result<Self, Box<dyn Error>>
+    ///
+    /// `limit` caps the number of entities read; `None` reads the entire dump.
+    fn from_wikidata_reader<R>(
+        reader: R,
+        relationship: &str,
+        limit: Option<usize>,
+    ) -> Result<Self, Box<dyn Error>>
     where
         R: BufRead + Send,
     {
+        // A `None` limit means "read everything"; `usize::MAX` is effectively
+        // unbounded for any real dump.
+        let limit = limit.unwrap_or(usize::MAX);
+
         // Read graph in parallel
         let graph: KnowledgeGraph<String> = reader
             .lines()
+            .take(limit)
             .par_bridge()
             .filter_map(|line_result| line_result.ok())
             .filter_map(|line| {
@@ -955,5 +982,19 @@ mod tests {
         adj_mat[1][0] = 1;
 
         assert_eq!(adj_mat, g.as_matrix());
+    }
+
+    /// Reads just the head of the full bzip2-compressed Wikidata dump and checks
+    /// that streaming decompression produces a non-empty graph for the
+    /// "instance of" (P31) relationship. Capping the read keeps this fast enough
+    /// to run as part of the normal test suite.
+    #[test]
+    fn from_wikidata_bz2() {
+        let g =
+            KnowledgeGraph::from_wikidata_bz2_limited("../data/latest-all.json.bz2", "P31", 500)
+                .expect("failed to parse bz2-compressed Wikidata dump");
+
+        assert!(g.num_vertices() > 0, "expected at least one vertex");
+        assert!(g.num_edges() > 0, "expected at least one edge");
     }
 }
