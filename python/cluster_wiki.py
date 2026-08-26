@@ -13,7 +13,7 @@ def main(
 ):
     """
     This script performs the Autograph clustering algorithm on the graph contained
-    within a given DOT file and outputs the result to a given JSON output file. 
+    within a given DOT file and outputs the result to a given JSON output file.
     Additional parameters for the algorithm may be given, but have defaults set.
     """
 
