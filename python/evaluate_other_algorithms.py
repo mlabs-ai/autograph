@@ -2,9 +2,21 @@ from autograph import autograph
 import igraph
 import json
 import random
-from sklearn.metrics import adjusted_rand_score
 import time
-import matplotlib.pyplot as plt
+import traceback
+
+from sklearn.metrics import adjusted_rand_score
+
+
+# Resolution grid swept by the modularity-based methods (Leiden, Louvain).
+# Each method reports the best ARI found over this grid, so every method is
+# given the same opportunity to recover the planted partition.
+RESOLUTION_GRID = [0.001, 0.01, 0.03, 0.1, 0.3, 0.5, 0.7, 1.0, 2.0, 5.0]
+
+
+def ari(true_ids, membership):
+    return adjusted_rand_score(true_ids, membership)
+
 
 def experiment_step(
     num_clusters: int,
@@ -12,7 +24,7 @@ def experiment_step(
     max_nodes: int,
     pepper_percent: float,
     salt_percent: float,
-    random_seed: int
+    random_seed: int,
 ) -> dict[str, float]:
     # Start by generating a graph whose clustering is known
     print("Building graph...")
@@ -41,7 +53,7 @@ def experiment_step(
     # Get the cluster ids for the base truth graph
     true_cluster_ids = []
     for i, cluster_size in enumerate(clusters):
-        true_cluster_ids += ([i] * cluster_size)
+        true_cluster_ids += [i] * cluster_size
 
     # Convert graph to iGraph format for use in other algorithms
     print("Converting to iGraph format")
@@ -67,64 +79,74 @@ def experiment_step(
             autograph_clusters[node_id] = i
     autograph_time = time.time() - starttime
 
-    # Calculate communities using different methods
-    print("Calculating clusters using eigenvector method")
-    starttime = time.time()
-    eigenvector_clusters = ig_graph.community_leading_eigenvector().membership
-    eigenvector_time = time.time() - starttime
-    
+    # --- Baselines -----------------------------------------------------------
+    # Louvain (multilevel) and Leiden are both modularity-based, so we sweep
+    # the resolution parameter and report the best ARI over the sweep.
     print("Calculating clusters using Louvain method")
     starttime = time.time()
-    louvain_clusters = ig_graph.community_multilevel().membership
+    louvain_best = 0.0
+    for resolution in RESOLUTION_GRID:
+        membership = ig_graph.community_multilevel(resolution=resolution).membership
+        louvain_best = max(louvain_best, ari(true_cluster_ids, membership))
     louvain_time = time.time() - starttime
 
     print("Calculating clusters using Leiden method")
     starttime = time.time()
-    leiden_clusters = ig_graph.community_leiden().membership
+    leiden_best = 0.0
+    for resolution in RESOLUTION_GRID:
+        membership = ig_graph.community_leiden(
+            objective_function="modularity", resolution=resolution
+        ).membership
+        leiden_best = max(leiden_best, ari(true_cluster_ids, membership))
     leiden_time = time.time() - starttime
 
-    print("Calculating clusters using random walk method")
+    print("Calculating clusters using leading eigenvector method")
     starttime = time.time()
-    random_walk_clusters = ig_graph.community_walktrap().as_clustering().membership
-    random_walk_time = time.time() - starttime
+    eigenvector_membership = ig_graph.community_leading_eigenvector(
+        clusters=num_clusters
+    ).membership
+    eigenvector_time = time.time() - starttime
 
     print("Calculating clusters using fast greedy method")
     starttime = time.time()
-    fast_greedy_clusters = ig_graph.community_fastgreedy().as_clustering().membership
+    fast_greedy_membership = ig_graph.community_fastgreedy().as_clustering(
+        n=num_clusters
+    ).membership
     fast_greedy_time = time.time() - starttime
 
     print("Calculating clusters using walktrap method")
     starttime = time.time()
-    walktrap_clusters = ig_graph.community_walktrap().as_clustering().membership
+    walktrap_membership = ig_graph.community_walktrap().as_clustering(
+        n=num_clusters
+    ).membership
     walktrap_time = time.time() - starttime
 
     print("Calculating clusters using infomap method")
     starttime = time.time()
-    infomap_clusters = ig_graph.community_walktrap().as_clustering().membership
+    infomap_membership = ig_graph.community_infomap().membership
     infomap_time = time.time() - starttime
 
     # Calculate distance scores
     scores = {
-        "autograph": adjusted_rand_score(true_cluster_ids, autograph_clusters),
+        "autograph": ari(true_cluster_ids, autograph_clusters),
         "autograph_time": autograph_time,
-        "louvain": adjusted_rand_score(true_cluster_ids, louvain_clusters),
+        "louvain": louvain_best,
         "louvain_time": louvain_time,
-        "leiden": adjusted_rand_score(true_cluster_ids, leiden_clusters),
+        "leiden": leiden_best,
         "leiden_time": leiden_time,
-        "random_walk": adjusted_rand_score(true_cluster_ids, random_walk_clusters),
-        "random_walk_time": random_walk_time,
-        "eigenvector": adjusted_rand_score(true_cluster_ids, eigenvector_clusters),
+        "eigenvector": ari(true_cluster_ids, eigenvector_membership),
         "eigenvector_time": eigenvector_time,
-        "fast_greedy": adjusted_rand_score(true_cluster_ids, fast_greedy_clusters),
+        "fast_greedy": ari(true_cluster_ids, fast_greedy_membership),
         "fast_greedy_time": fast_greedy_time,
-        "walktrap": adjusted_rand_score(true_cluster_ids, walktrap_clusters),
+        "walktrap": ari(true_cluster_ids, walktrap_membership),
         "walktrap_time": walktrap_time,
-        "infomap_greedy": adjusted_rand_score(true_cluster_ids, infomap_clusters),
+        "infomap": ari(true_cluster_ids, infomap_membership),
         "infomap_time": infomap_time,
         "num_vertices": graph.num_vertices(),
-        "num_edges": graph.num_edges()
+        "num_edges": graph.num_edges(),
     }
     return scores
+
 
 if __name__ == "__main__":
     total_scores = {}
@@ -138,7 +160,9 @@ if __name__ == "__main__":
                 total_scores.setdefault(k, [])
                 total_scores[k].append(v)
             i += 1
-        except:
+        except Exception:
+            print("Iteration failed, retrying with a new seed:")
+            traceback.print_exc()
             offset += 1
 
     average_scores = {k: sum(v) / len(v) for k, v in total_scores.items()}
