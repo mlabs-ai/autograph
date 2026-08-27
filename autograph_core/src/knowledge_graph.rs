@@ -159,23 +159,40 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
+    ///
+    /// This builds a fresh `exp` lookup table on each call. The `cluster`
+    /// method uses `cluster_step_table` directly so the table is built only
+    /// once, but this public entry point remains for callers (e.g. the
+    /// visualization notebook) that drive individual steps.
     pub fn cluster_step(&mut self, factor: f64, range: &Range<usize>) -> Vec<f64> {
+        let exp_table: Vec<f64> = (0..self.vertex_mapping.len())
+            .map(|i| (-factor * i as f64).exp())
+            .collect();
+        self.cluster_step_table(range, &exp_table)
+    }
+
+    /// Core of `cluster_step`, using a precomputed table where
+    /// `exp_table[k] == exp(-factor * k)`. The `exp` argument in the original
+    /// algorithm was always `-factor * (local index)`, so replacing the
+    /// per-edge transcendental `exp` with two array lookups is an exact
+    /// (bit-for-bit) optimization that removes a dominant cost.
+    fn cluster_step_table(&mut self, range: &Range<usize>, exp_table: &[f64]) -> Vec<f64> {
         // Get the weight per vertex
         let mut weights = vec![0.0; range.end - range.start];
 
         let mut num_connections = 0;
         for &(id1, id2) in &self.edges {
-            if !range.contains(&id1) || !range.contains(&id2) {
+            if id1 < range.start || id1 >= range.end || id2 < range.start || id2 >= range.end {
                 continue;
             }
 
             num_connections += 1;
 
-            let id1 = id1 - range.start;
-            let id2 = id2 - range.start;
+            let a = id1 - range.start;
+            let b = id2 - range.start;
 
-            weights[id1] += (-factor * id2 as f64).exp();
-            weights[id2] += (-factor * id1 as f64).exp();
+            weights[a] += exp_table[b];
+            weights[b] += exp_table[a];
         }
 
         // If all weights are 0, stop early
@@ -184,20 +201,52 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
-        // so we can use an unstable sort to save memory
-        let mut weights: Vec<_> = weights.into_iter().enumerate().collect();
-        weights.par_sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        // so we can use an unstable sort to save memory. Below a threshold the
+        // rayon-parallel sort overhead outweighs its benefit, so fall back to a
+        // serial sort for the many small sub-ranges seen during recursion.
+        const PARALLEL_SORT_THRESHOLD: usize = 4096;
 
-        // Get new mapping and apply it
-        let new_mapping = weights
-            .iter()
-            .enumerate()
-            .filter(|(new, (old, _))| new != old)
-            .map(|(new, &(old, _))| (old + range.start, new + range.start))
-            .collect();
-        self.remap_vertices(&new_mapping);
+        let mut weights: Vec<_> = weights.into_iter().enumerate().collect();
+        if weights.len() >= PARALLEL_SORT_THRESHOLD {
+            weights.par_sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        } else {
+            weights.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        }
+
+        // Build an array-based permutation (`perm[old_local] == new_local`) and
+        // apply it. This specializes the general `remap_vertices` to the
+        // contiguous-range permutation produced here, replacing a `HashMap`
+        // allocation plus hashing per vertex and per edge with cheap array
+        // index lookups.
+        let mut perm = vec![0usize; weights.len()];
+        for (new, &(old, _)) in weights.iter().enumerate() {
+            perm[old] = new;
+        }
+        self.remap_vertices_perm(range, &perm);
 
         weights.into_iter().map(|(_, w)| w).collect()
+    }
+
+    /// Applies a local permutation of vertex IDs within `range`, where
+    /// `perm[old_id - range.start]` gives the new local ID. This is a fast,
+    /// allocation-free (`HashMap`-free) special case of the more general
+    /// `remap_vertices`, for the contiguous-range permutation that
+    /// `cluster_step_table` produces.
+    fn remap_vertices_perm(&mut self, range: &Range<usize>, perm: &[usize]) {
+        let start = range.start;
+        for id in self.vertex_mapping.values_mut() {
+            if *id >= start && *id < range.end {
+                *id = start + perm[*id - start];
+            }
+        }
+        for (src, dst) in self.edges.iter_mut() {
+            if *src >= start && *src < range.end {
+                *src = start + perm[*src - start];
+            }
+            if *dst >= start && *dst < range.end {
+                *dst = start + perm[*dst - start];
+            }
+        }
     }
 
     pub fn cluster(
@@ -248,13 +297,18 @@ impl<V: Ord> KnowledgeGraph<V> {
         }
         // Otherwise, continue to cluster
         else {
+            // Precompute the exp lookup table once; `cluster_step_table` index
+            // `k` uses `exp_table[k] == exp(-factor * k)`. The largest local
+            // index seen is `num_nodes - 1`, so the table covers that range.
+            let exp_table: Vec<f64> = (0..num_nodes).map(|i| (-factor * i as f64).exp()).collect();
+
             let mut clusters = Vec::new();
             self.cluster_worker(
                 0..num_nodes,
-                factor,
                 steps_before_subdivide,
                 boundary_threshold,
                 min_cluster_size,
+                &exp_table,
                 &mut clusters,
             );
 
@@ -370,10 +424,10 @@ impl<V: Ord> KnowledgeGraph<V> {
     fn cluster_worker(
         &mut self,
         range: Range<usize>,
-        factor: f64,
         steps_before_subdivide: usize,
         boundary_threshold: f64,
         min_cluster_size: usize,
+        exp_table: &[f64],
         accumulator: &mut Vec<Cluster>,
     ) {
         // println!("> Running on {:?}", &range);
@@ -393,7 +447,7 @@ impl<V: Ord> KnowledgeGraph<V> {
         // Step 1: Do some cluster steps
         let mut weights = Vec::new();
         for _ in 0..steps_before_subdivide {
-            weights = self.cluster_step(factor, &range);
+            weights = self.cluster_step_table(&range, exp_table);
 
             // If the number of connected vertices is low, return that this is a weak cluster
             let num_connected = weights.iter().take_while(|&&w| w > 0.0).count();
@@ -513,10 +567,10 @@ impl<V: Ord> KnowledgeGraph<V> {
                         if num_strong_clusters > 1 {
                             self.cluster_worker(
                                 cluster.range,
-                                factor,
                                 steps_before_subdivide,
                                 boundary_threshold,
                                 min_cluster_size,
+                                exp_table,
                                 accumulator,
                             );
                         } else {
@@ -536,10 +590,10 @@ impl<V: Ord> KnowledgeGraph<V> {
             let last_cluster_end = accumulator.last().unwrap().range.end;
             self.cluster_worker(
                 last_cluster_end..range.end,
-                factor,
                 steps_before_subdivide,
                 boundary_threshold,
                 min_cluster_size,
+                exp_table,
                 accumulator,
             );
         }
