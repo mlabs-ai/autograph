@@ -177,27 +177,54 @@ impl<V: Ord> KnowledgeGraph<V> {
     /// per-edge transcendental `exp` with two array lookups is an exact
     /// (bit-for-bit) optimization that removes a dominant cost.
     fn cluster_step_table(&mut self, range: &Range<usize>, exp_table: &[f64]) -> Vec<f64> {
+        // Extract the in-range edges (local coordinates), compute weights + the
+        // sorting permutation, then apply it globally once.
+        let local_edges: Vec<(usize, usize)> = self
+            .edges
+            .iter()
+            .filter(|&&(a, b)| {
+                a >= range.start && a < range.end && b >= range.start && b < range.end
+            })
+            .map(|&(a, b)| (a - range.start, b - range.start))
+            .collect();
+
+        let (weights, perm) =
+            Self::compute_weights(&local_edges, range.end - range.start, exp_table);
+
+        if let Some(perm) = perm {
+            self.remap_vertices_perm(range, &perm);
+        }
+
+        weights
+    }
+
+    /// Given edges expressed in `0..len` local coordinates, compute the
+    /// vertex weights (`weights[index]`), sort them descending, and return the
+    /// sorted weights plus the corresponding permutation
+    /// (`perm[old_local] == new_local`).
+    ///
+    /// This is a pure function of its arguments, which lets callers drive
+    /// multiple steps against a *local* edge list without touching global
+    /// state. Returns `None` for the permutation when there are no edges (and
+    /// hence no ordering to impose).
+    fn compute_weights(
+        local_edges: &[(usize, usize)],
+        len: usize,
+        exp_table: &[f64],
+    ) -> (Vec<f64>, Option<Vec<usize>>) {
         // Get the weight per vertex
-        let mut weights = vec![0.0; range.end - range.start];
+        let mut weights = vec![0.0; len];
 
         let mut num_connections = 0;
-        for &(id1, id2) in &self.edges {
-            if id1 < range.start || id1 >= range.end || id2 < range.start || id2 >= range.end {
-                continue;
-            }
-
+        for &(a, b) in local_edges {
             num_connections += 1;
-
-            let a = id1 - range.start;
-            let b = id2 - range.start;
-
             weights[a] += exp_table[b];
             weights[b] += exp_table[a];
         }
 
         // If all weights are 0, stop early
         if num_connections == 0 {
-            return weights;
+            return (weights, None);
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
@@ -206,25 +233,21 @@ impl<V: Ord> KnowledgeGraph<V> {
         // serial sort for the many small sub-ranges seen during recursion.
         const PARALLEL_SORT_THRESHOLD: usize = 4096;
 
-        let mut weights: Vec<_> = weights.into_iter().enumerate().collect();
-        if weights.len() >= PARALLEL_SORT_THRESHOLD {
-            weights.par_sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        let mut indexed: Vec<_> = weights.iter().copied().enumerate().collect();
+        if indexed.len() >= PARALLEL_SORT_THRESHOLD {
+            indexed.par_sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
         } else {
-            weights.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+            indexed.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
         }
 
-        // Build an array-based permutation (`perm[old_local] == new_local`) and
-        // apply it. This specializes the general `remap_vertices` to the
-        // contiguous-range permutation produced here, replacing a `HashMap`
-        // allocation plus hashing per vertex and per edge with cheap array
-        // index lookups.
-        let mut perm = vec![0usize; weights.len()];
-        for (new, &(old, _)) in weights.iter().enumerate() {
+        // Build an array-based permutation (`perm[old_local] == new_local`).
+        let mut perm = vec![0usize; len];
+        for (new, &(old, _)) in indexed.iter().enumerate() {
             perm[old] = new;
         }
-        self.remap_vertices_perm(range, &perm);
 
-        weights.into_iter().map(|(_, w)| w).collect()
+        let sorted_weights = indexed.into_iter().map(|(_, w)| w).collect();
+        (sorted_weights, Some(perm))
     }
 
     /// Applies a local permutation of vertex IDs within `range`, where
@@ -444,10 +467,29 @@ impl<V: Ord> KnowledgeGraph<V> {
             return;
         }
 
-        // Step 1: Do some cluster steps
+        // Step 1: Extract the in-range edges once (local coordinates) and run
+        // the cluster steps against this local list, applying each step's
+        // sorting permutation to the local list so it stays consistent. The
+        // global `self.edges`/`vertex_mapping` are only renumbered once, at the
+        // end of the node, using the net permutation. This removes the
+        // step-count multiplier on the full-edge rescan.
+        let len = range.end - range.start;
+        let mut local_edges: Vec<(usize, usize)> = self
+            .edges
+            .iter()
+            .filter(|&&(a, b)| {
+                a >= range.start && a < range.end && b >= range.start && b < range.end
+            })
+            .map(|&(a, b)| (a - range.start, b - range.start))
+            .collect();
+
+        // Identity permutation initially; composition of all step permutations.
+        let mut net_perm: Vec<usize> = (0..len).collect();
+
         let mut weights = Vec::new();
         for _ in 0..steps_before_subdivide {
-            weights = self.cluster_step_table(&range, exp_table);
+            let (w, perm) = Self::compute_weights(&local_edges, len, exp_table);
+            weights = w;
 
             // If the number of connected vertices is low, return that this is a weak cluster
             let num_connected = weights.iter().take_while(|&&w| w > 0.0).count();
@@ -456,7 +498,24 @@ impl<V: Ord> KnowledgeGraph<V> {
                 accumulator.push(Cluster::new(ClusterType::Weak, range));
                 return;
             }
+
+            if let Some(step_perm) = perm {
+                // Compose: net = step_perm ∘ net, i.e. net[x] = step_perm[net[x]].
+                for entry in net_perm.iter_mut() {
+                    *entry = step_perm[*entry];
+                }
+                // Apply step_perm to the local edge list so the next step sees
+                // the renumbered vertices.
+                for (a, b) in local_edges.iter_mut() {
+                    *a = step_perm[*a];
+                    *b = step_perm[*b];
+                }
+            }
         }
+
+        // Apply the net permutation to global state once, so that recursive
+        // children and the subsequent affinity pass see consistent IDs.
+        self.remap_vertices_perm(&range, &net_perm);
 
         // Step 2: Get log weights
         let log_weights: Vec<_> = weights
@@ -1036,6 +1095,115 @@ mod tests {
         adj_mat[1][0] = 1;
 
         assert_eq!(adj_mat, g.as_matrix());
+    }
+
+    /// A single `cluster_step` on a small path graph yields exact, reproducible
+    /// weights. This locks in the numerical behavior of the optimized
+    /// `cluster_step_table` implementation (the `exp`-lookup-table equivalence).
+    #[test]
+    fn cluster_step_weight_exact() {
+        // Directed path 0 -> 1 -> 2. The algorithm treats edges as contributing
+        // to both endpoints, so effectively an undirected path.
+        let mut g: KnowledgeGraph<_> = [(0, 1), (1, 2)].into_iter().collect();
+
+        let factor = 0.01;
+        let weights = g.cluster_step(factor, &(0..3));
+
+        assert_eq!(weights.len(), 3);
+
+        // Computed by hand from the algorithm:
+        //   weights[0] += exp_table[1]
+        //   weights[1] += exp_table[0] + exp_table[2]
+        //   weights[2] += exp_table[1]
+        // where exp_table[k] = exp(-factor * k). The returned vector is sorted
+        // descending, so the middle node (index 1, degree 2) is first, and the
+        // two symmetric endpoints (equal weight) follow.
+        let top = 1.0 + (-2.0 * factor).exp();
+        let bot = (-1.0 * factor).exp();
+
+        assert_eq!(weights[0], top);
+        assert_eq!(weights[1], bot);
+        assert_eq!(weights[2], bot);
+    }
+
+    /// `cluster_step` must be deterministic: two calls on equivalent graphs
+    /// produce identical weight vectors.
+    #[test]
+    fn cluster_step_deterministic() {
+        let build = || -> KnowledgeGraph<usize> { [(0, 1), (1, 2), (2, 3)].into_iter().collect() };
+
+        let mut g1 = build();
+        let mut g2 = build();
+
+        let w1 = g1.cluster_step(0.05, &(0..4));
+        let w2 = g2.cluster_step(0.05, &(0..4));
+
+        assert_eq!(w1, w2);
+    }
+
+    /// Helper: assert that a sequence of clusters partitions the full vertex
+    /// set 0..n with no gaps and no overlaps.
+    fn assert_valid_partition(clusters: &[Vec<usize>], n: usize) {
+        let mut seen = vec![false; n];
+        let mut count = 0;
+        for cluster in clusters {
+            assert!(!cluster.is_empty(), "clusters must be non-empty");
+            for &v in cluster {
+                assert!(v < n, "vertex id {} out of range", v);
+                assert!(!seen[v], "vertex {} appears in more than one cluster", v);
+                seen[v] = true;
+                count += 1;
+            }
+        }
+        assert_eq!(count, n, "partition must cover all {} vertices", n);
+    }
+
+    /// `cluster` must terminate and produce a valid partition of the vertex
+    /// set even on randomized planted-partition graphs. This is a smoke test
+    /// against infinite recursion, overlap, or dropped vertices.
+    #[test]
+    fn cluster_partition_valid() {
+        use crate::graph_builder::GraphBuilder;
+
+        for seed in 0..5u64 {
+            let mut builder = GraphBuilder::new(seed);
+            for _ in 0..5 {
+                builder.add_scale_free_cluster(20, 3).unwrap();
+            }
+            for i in 0..5 {
+                builder.add_random_link(i, (i + 1) % 5).unwrap();
+            }
+
+            let mut graph = builder.finalize_graph();
+            let n = graph.num_vertices();
+            graph.cluster(0.01, 3, 0.1, 5);
+
+            assert_valid_partition(&graph.get_clusters(), n);
+        }
+    }
+
+    /// `cluster` must be deterministic: identical inputs produce identical
+    /// cluster assignments (same vertex ids grouped the same way).
+    #[test]
+    fn cluster_deterministic() {
+        use crate::graph_builder::GraphBuilder;
+
+        let build = |seed: u64| {
+            let mut builder = GraphBuilder::new(seed);
+            for _ in 0..4 {
+                builder.add_dense_cluster(6, 0.5).unwrap();
+            }
+            builder.add_random_link(0, 1).unwrap();
+            builder.add_random_link(2, 3).unwrap();
+            let mut graph = builder.finalize_graph();
+            graph.cluster(0.01, 3, 0.1, 3);
+            graph
+        };
+
+        let g1 = build(42);
+        let g2 = build(42);
+
+        assert_eq!(g1.get_clusters(), g2.get_clusters());
     }
 
     /// Reads just the head of the full bzip2-compressed Wikidata dump and checks
