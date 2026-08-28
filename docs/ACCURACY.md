@@ -19,8 +19,9 @@ evaluation.
 To combat this, we evaluated the accuracy of our algorithm on graphs that we
 generated algorithmically. The graphs were generated in the following way:
 
-1. Each graph had a configurable number of clusters (150 in the runs reported
-   below).
+1. Each graph had a configurable number of clusters. We report results across a
+   range of scales — 150, 500, 1000, 1500, and 2000 planted clusters — to
+   observe how each algorithm scales.
 2. Each cluster had a number of nodes chosen randomly from the range 20 to 200.
 3. Each cluster was a
    [scale-free network](https://en.wikipedia.org/wiki/Scale-free_network). We
@@ -67,30 +68,52 @@ reflection of the method.
 
 In this section, we present the accuracy results for Autograph vs a selection of
 some of the most common graph clustering algorithms. We repeated the experiment
-10 times (each iteration seeded with its iteration index) and collected the
-average results for each algorithm, which is what is presented here.
+10 times per scale (each iteration seeded with its iteration index) and
+collected the average `adjusted_rand_score` for each algorithm.
 
-| Algorithm    | Score |
-|--------------|-------|
-| Walktrap     | 0.998 |
-| Infomap      | 0.996 |
-| Louvain      | 0.879 |
-| Leiden       | 0.878 |
-| Autograph    | 0.731 |
-| Fast Greedy  | 0.226 |
+### Accuracy across scales
 
-On the planted scale-free graphs we tested, **Walktrap and Infomap recover the
-planted partition almost perfectly**, followed closely by the tuned modularity
-methods (Louvain and Leiden). Autograph scores in the middle of the pack, ahead
-of fast greedy.
+The table below reports the average `adjusted_rand_score` at each planted
+cluster count. The graphs range from ~17,000 vertices (150 clusters) to
+~219,000 vertices (2000 clusters).
 
-We will note, however, that the potential number of graphs is infinite, and we
-could only feasibly test our algorithm on a small number of graphs. Therefore,
-it is difficult to generalize these results. In particular, these graphs were
-generated to have clean, well-separated clusters; on fuzzier or more realistic
-graphs the ordering between methods may differ, and Autograph's
-context-driven (frame-of-reference) partitioning may offer advantages that a
-raw accuracy score on planted graphs does not capture.
+| Algorithm   | 150    | 500    | 1000   | 1500   | 2000   |
+|-------------|--------|--------|--------|--------|--------|
+| Infomap     | 0.996  | 0.984  | 0.977  | 0.971  | 0.966  |
+| Autograph   | 0.731  | 0.700  | 0.715  | 0.695  | 0.683  |
+| Louvain     | 0.879  | 0.656  | 0.531  | 0.469  | 0.428  |
+| Leiden      | 0.878  | 0.655  | 0.533  | 0.469  | 0.429  |
+| Fast Greedy | 0.226  | 0.110  | 0.083  | 0.074  | 0.070  |
+| Walktrap    | 0.998  | 0.997  | 0.998  | —      | —      |
+
+**Walktrap** recovers the planted partition almost perfectly up to 1000
+clusters, but its distance-matrix memory scales quadratically in the vertex
+count and exhausts available RAM at 1500+ clusters, so it is omitted there.
+
+**Infomap** is the strongest generally-applicable baseline, degrading only
+slightly (0.996 → 0.966) across the full scale range.
+
+**Autograph holds its accuracy steady** (~0.68–0.73) across a 13× growth in
+graph size. The tuned modularity methods — Louvain and Leiden — degrade sharply
+(from ~0.88 to ~0.43) as the number of clusters grows. As a result, Autograph
+overtakes both around 500 clusters, and by 2000 clusters it leads them by a
+margin of roughly 0.26 in adjusted Rand score.
+
+This is consistent with the project's design goal: Autograph is intended for
+large, frame-of-reference-structured knowledge graphs, where its accuracy is
+relatively insensitive to scale, whereas modularity-based methods struggle once
+the community structure becomes finer-grained.
+
+### Caveats
+
+The potential number of graphs is infinite, and we could only feasibly test on
+a small number of graphs. Therefore it is difficult to generalize these
+results. In particular, these graphs were generated to have clean, well-separated
+clusters; on fuzzier or more realistic graphs the ordering between methods may
+differ. The comparison above uses a single accuracy metric on planted graphs;
+it does not measure other qualities Autograph is designed for (e.g. robust
+frame-of-reference assignment, or the ability of the same algorithm to serve as
+a recommender).
 
 ### How this differs from an earlier version of this document
 

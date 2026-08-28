@@ -47,29 +47,32 @@ recursion-depth multipliers while preserving identical cluster output.
 
 ## Wall clock comparison
 
-When we evaluated Autograph's performance against other algorithms (see
-`ACCURACY.md` for details — 150 clusters, 20–200 nodes each, ~16.6k vertices and
-~206k edges per graph, 10 iterations), we also recorded the average wall clock
-time of each algorithm. The following table outlines the time complexity and
-average wall clock time for each algorithm:
+We recorded the average wall-clock time per algorithm on the planted
+scale-free graphs described in `ACCURACY.md` (20–200 nodes per cluster, 10
+iterations per scale). Times are average seconds per run.
 
-| Algorithm   | Big O Complexity     | Wall Clock Time (s) |
-|-------------|----------------------|---------------------|
-| Fast Greedy | O(E log V)           | 0.15                |
-| Autograph   | O(n · (E + V log V)) | 0.39                |
-| Leiden      | O(E)                 | 0.55                |
-| Louvain     | O(E)                 | 0.83                |
-| Infomap     | O(E)                 | 2.41                |
-| Walktrap    | O((V²) log V)        | 2.86                |
+| Algorithm   | Big O Complexity     | 150    | 1000   | 2000   |
+|-------------|----------------------|--------|--------|--------|
+| Fast Greedy | O(E log V)           | 0.15   | 1.00   | 1.81   |
+| Leiden      | O(E)                 | 0.55   | 6.15   | 10.8   |
+| Louvain     | O(E)                 | 0.83   | 14.4   | 24.6   |
+| Autograph   | O(n · (E + V log V)) | 0.39   | 20.3   | 54.3   |
+| Infomap     | O(E)                 | 2.41   | 23.5   | 41.1   |
+| Walktrap    | O((V²) log V)        | 2.86   | 144    | —      |
+
+(Dashes denote scales at which the method could not complete: walktrap's
+distance-matrix memory is quadratic in the vertex count and exceeds available
+RAM at 1500 clusters and above. See `ACCURACY.md`.)
 
 There are a few caveats to mention. Wall clock evaluation of algorithms is
 rarely a truly reliable measurement; different computers have different
 architectures, different hardware, and different operating conditions. All of
 these can affect the wall clock time of an algorithm. Additionally, the Louvain
-and Leiden figures above include a resolution sweep (see `ACCURACY.md`), so they
+and Leiden figures include a resolution sweep (see `ACCURACY.md`), so they
 reflect the cost of tuning those methods rather than a single run.
 
-Autograph's time is now in the same order of magnitude as the modularity-based
-methods on these graphs, rather than orders of magnitude slower as an earlier
-version of this document reported. The earlier figure (347s per run) reflected
-the un-optimized `exp`-per-edge implementation described above.
+Autograph's time grows more steeply than the pure-modularity methods, consistent
+with its `O(n · (E + V log V))` bound and the extra `n` term from recursive
+subdivision. It remains within the same order of magnitude as Louvain and
+Infomap across the scales tested, and is far faster than the un-optimized
+implementation (which took 347s at the 150-cluster scale; see above).

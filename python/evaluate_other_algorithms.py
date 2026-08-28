@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import random
 import time
 import traceback
@@ -15,9 +16,37 @@ from sklearn.metrics import adjusted_rand_score
 # given the same opportunity to recover the planted partition.
 RESOLUTION_GRID = [0.001, 0.01, 0.03, 0.1, 0.3, 0.5, 0.7, 1.0, 2.0, 5.0]
 
+# Walktrap builds a distances matrix that is quadratic in the number of
+# vertices; empirically it exhausts RAM once the graph becomes large enough.
+# Above this many expected vertices we skip it (unless explicitly forced).
+WALKTRAP_VERTEX_LIMIT = 120_000
+
+# Conservative per-worker peak-memory estimate, in GiB per vertex. Measured
+# workers peak at roughly 6--19 GiB for 110k--220k-vertex graphs; a linear
+# fit with ~2x headroom is `~1.0e-4 GiB/vertex`. Used only to auto-cap the
+# number of parallel workers.
+PER_VERTEX_WORKER_GIB = 1.0e-4
+
 
 def ari(true_ids, membership):
     return adjusted_rand_score(true_ids, membership)
+
+
+def expected_vertices(num_clusters, min_nodes, max_nodes):
+    """Average number of vertices for the given planted-partition parameters."""
+    return num_clusters * (min_nodes + max_nodes) / 2
+
+
+def available_memory_gib():
+    """Best-effort estimate of available RAM in GiB (Linux only)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except OSError:
+        pass
+    return None
 
 
 def experiment_step(
@@ -29,11 +58,15 @@ def experiment_step(
     random_seed: int,
     autograph_factor: float = 0.01,
     autograph_steps: int = 2,
+    run_walktrap: bool = True,
 ) -> dict:
     """Run one experiment on a single seeded graph and return its scores.
 
     This is a module-level function (rather than a nested closure) so it can be
     pickled and shipped to worker processes under `ProcessPoolExecutor`.
+
+    `run_walktrap` may be disabled for very large graphs, since walktrap's
+    distance-matrix memory scales quadratically in the vertex count.
     """
     # Start by generating a graph whose clustering is known
     random.seed(random_seed)
@@ -111,17 +144,11 @@ def experiment_step(
     fast_greedy_time = time.time() - starttime
 
     starttime = time.time()
-    walktrap_membership = ig_graph.community_walktrap().as_clustering(
-        n=num_clusters
-    ).membership
-    walktrap_time = time.time() - starttime
-
-    starttime = time.time()
     infomap_membership = ig_graph.community_infomap().membership
     infomap_time = time.time() - starttime
 
     # Calculate distance scores
-    return {
+    scores = {
         "seed": random_seed,
         "autograph": ari(true_cluster_ids, autograph_clusters),
         "autograph_time": autograph_time,
@@ -131,13 +158,23 @@ def experiment_step(
         "leiden_time": leiden_time,
         "fast_greedy": ari(true_cluster_ids, fast_greedy_membership),
         "fast_greedy_time": fast_greedy_time,
-        "walktrap": ari(true_cluster_ids, walktrap_membership),
-        "walktrap_time": walktrap_time,
         "infomap": ari(true_cluster_ids, infomap_membership),
         "infomap_time": infomap_time,
         "num_vertices": graph.num_vertices(),
         "num_edges": graph.num_edges(),
     }
+
+    # Walktrap is memory-hungry (O(V^2)); skip on very large graphs.
+    if run_walktrap:
+        starttime = time.time()
+        walktrap_membership = ig_graph.community_walktrap().as_clustering(
+            n=num_clusters
+        ).membership
+        walktrap_time = time.time() - starttime
+        scores["walktrap"] = ari(true_cluster_ids, walktrap_membership)
+        scores["walktrap_time"] = walktrap_time
+
+    return scores
 
 
 def _run_step(args):
@@ -157,6 +194,7 @@ def _run_step(args):
             seed,
             autograph_factor=params["autograph_factor"],
             autograph_steps=params["autograph_steps"],
+            run_walktrap=params["run_walktrap"],
         )
     except Exception as exc:
         return seed, f"ERROR: {exc}\n{traceback.format_exc()}"
@@ -200,6 +238,23 @@ def main():
         help="Autograph steps_before_subdivide (default 2, was 5)",
     )
     parser.add_argument(
+        "--no-walktrap",
+        action="store_true",
+        help="Skip the walktrap baseline (memory-hungry on very large graphs)",
+    )
+    parser.add_argument(
+        "--force-walktrap",
+        action="store_true",
+        help="Run walktrap even above the automatic vertex-limit threshold",
+    )
+    parser.add_argument(
+        "--max-memory-gib",
+        type=float,
+        default=None,
+        help="Available RAM in GiB to budget for parallel workers "
+        "(detected from /proc/meminfo by default)",
+    )
+    parser.add_argument(
         "--sequential",
         action="store_true",
         help="Run in a single process (default: parallel)",
@@ -209,6 +264,44 @@ def main():
     )
     args = parser.parse_args()
 
+    # --- Memory-aware decisions --------------------------------------------
+    num_vertices_est = expected_vertices(args.clusters, args.min_nodes, args.max_nodes)
+
+    # Decide whether to run walktrap. Its quadratic memory makes it unsafe on
+    # large graphs; skip automatically above the vertex limit unless forced.
+    run_walktrap = True
+    if args.no_walktrap:
+        run_walktrap = False
+    elif num_vertices_est > WALKTRAP_VERTEX_LIMIT and not args.force_walktrap:
+        run_walktrap = False
+        print(
+            f"Auto-skipping walktrap: ~{int(num_vertices_est)} expected vertices "
+            f"exceeds {WALKTRAP_VERTEX_LIMIT} (pass --force-walktrap to override)",
+            flush=True,
+        )
+
+    # Decide how many parallel workers fit in memory. Each worker's peak memory
+    # grows with graph size; cap concurrency so workers collectively stay under
+    # the available RAM.
+    if args.workers is not None:
+        workers = args.workers
+    else:
+        per_worker_gib = max(1.0, num_vertices_est * PER_VERTEX_WORKER_GIB)
+        mem = args.max_memory_gib or available_memory_gib()
+        cpu = os.cpu_count() or 1
+        if mem is None:
+            workers = min(cpu, 4)
+        else:
+            # Leave ~10% headroom for the OS and the parent process.
+            budget = max(1.0, mem * 0.9)
+            workers = max(1, min(cpu, int(budget / per_worker_gib)))
+        if workers < cpu:
+            print(
+                f"Auto-capping workers to {workers} (~{per_worker_gib:.0f} GiB/worker "
+                f"within ~{mem:.0f} GiB available)",
+                flush=True,
+            )
+
     params = {
         "num_clusters": args.clusters,
         "min_nodes": args.min_nodes,
@@ -217,13 +310,14 @@ def main():
         "salt": args.salt,
         "autograph_factor": args.autograph_factor,
         "autograph_steps": args.autograph_steps,
+        "run_walktrap": run_walktrap,
     }
     seeds = list(range(args.iterations))
 
     results = {}
     failures = []
 
-    if args.sequential or args.workers == 1:
+    if args.sequential or workers == 1:
         for seed in seeds:
             print(f"Running seed {seed} ({seed + 1}/{args.iterations})", flush=True)
             seed, score = _run_step((seed, params, args.rayon_threads))
@@ -233,7 +327,6 @@ def main():
             else:
                 results[seed] = score
     else:
-        workers = args.workers
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(_run_step, (seed, params, args.rayon_threads)): seed
