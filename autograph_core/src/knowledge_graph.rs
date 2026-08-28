@@ -262,6 +262,16 @@ impl<V: Ord> KnowledgeGraph<V> {
                 *id = start + perm[*id - start];
             }
         }
+        self.remap_edges_perm(range, perm);
+    }
+
+    /// Rewrites only `self.edges` under the given local permutation, leaving
+    /// `vertex_mapping` untouched. During the clustering recursion,
+    /// `vertex_mapping` is never read, so deferring its update to the final
+    /// `remap_vertices` call avoids an O(V log V) `BTreeMap` scan per recursion
+    /// node.
+    fn remap_edges_perm(&mut self, range: &Range<usize>, perm: &[usize]) {
+        let start = range.start;
         for (src, dst) in self.edges.iter_mut() {
             if *src >= start && *src < range.end {
                 *src = start + perm[*src - start];
@@ -325,6 +335,32 @@ impl<V: Ord> KnowledgeGraph<V> {
             // index seen is `num_nodes - 1`, so the table covers that range.
             let exp_table: Vec<f64> = (0..num_nodes).map(|i| (-factor * i as f64).exp()).collect();
 
+            // Position arrays: `pos_to_id[p]` is the stable vertex ID currently
+            // at position `p`, and `id_to_pos[id]` its inverse. Initially the
+            // ID space and position space coincide.
+            let mut pos_to_id: Vec<usize> = (0..num_nodes).collect();
+            let mut id_to_pos: Vec<usize> = (0..num_nodes).collect();
+
+            // Build a CSR adjacency index on *stable* IDs. This lets each
+            // recursion node enumerate its in-range edges in O(E_in_range)
+            // instead of scanning the entire edge list.
+            //
+            // `offsets` has length `num_nodes + 1`; the neighbors of stable
+            // vertex `u` are `neighbors[offsets[u]..offsets[u+1]]`.
+            let mut offsets = vec![0usize; num_nodes + 1];
+            for &(a, _) in &self.edges {
+                offsets[a + 1] += 1;
+            }
+            for i in 0..num_nodes {
+                offsets[i + 1] += offsets[i];
+            }
+            let mut neighbors = vec![0usize; self.edges.len()];
+            let mut cursor = offsets.clone();
+            for &(a, b) in &self.edges {
+                neighbors[cursor[a]] = b;
+                cursor[a] += 1;
+            }
+
             let mut clusters = Vec::new();
             self.cluster_worker(
                 0..num_nodes,
@@ -332,8 +368,30 @@ impl<V: Ord> KnowledgeGraph<V> {
                 boundary_threshold,
                 min_cluster_size,
                 &exp_table,
+                &mut pos_to_id,
+                &mut id_to_pos,
+                &offsets,
+                &neighbors,
                 &mut clusters,
             );
+
+            // Re-materialize `self.edges` into position space once, so the
+            // subsequent affinity pass (and final remap) see consistent IDs.
+            for (a, b) in self.edges.iter_mut() {
+                *a = id_to_pos[*a];
+                *b = id_to_pos[*b];
+            }
+            // Do the same for `vertex_mapping` (label -> id): the recursion
+            // permuted positions, but `vertex_mapping` was deferred, so its
+            // values still hold pre-recursion IDs. Map them to final positions
+            // so `get_clusters()` (and the final remap) see the same ID space
+            // as `self.edges`. Disconnected nodes (ids >= num_nodes) were
+            // placed at the tail by Step 0 and are untouched by the recursion.
+            for id in self.vertex_mapping.values_mut() {
+                if *id < num_nodes {
+                    *id = id_to_pos[*id];
+                }
+            }
 
             // Get all strong cluster assignments
             let mut cluster_assignments = BTreeMap::new();
@@ -451,6 +509,10 @@ impl<V: Ord> KnowledgeGraph<V> {
         boundary_threshold: f64,
         min_cluster_size: usize,
         exp_table: &[f64],
+        pos_to_id: &mut Vec<usize>,
+        id_to_pos: &mut Vec<usize>,
+        offsets: &[usize],
+        neighbors: &[usize],
         accumulator: &mut Vec<Cluster>,
     ) {
         // println!("> Running on {:?}", &range);
@@ -469,19 +531,28 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Step 1: Extract the in-range edges once (local coordinates) and run
         // the cluster steps against this local list, applying each step's
-        // sorting permutation to the local list so it stays consistent. The
-        // global `self.edges`/`vertex_mapping` are only renumbered once, at the
-        // end of the node, using the net permutation. This removes the
-        // step-count multiplier on the full-edge rescan.
+        // sorting permutation to the local list so it stays consistent.
+        //
+        // `self.edges` is *not* mutated during the recursion: the vertex
+        // ordering is tracked separately in `pos_to_id`/`id_to_pos` (position
+        // → stable ID and its inverse). The global edge list is re-materialized
+        // once, after `cluster_worker` unwinds, in `cluster`.
         let len = range.end - range.start;
-        let mut local_edges: Vec<(usize, usize)> = self
-            .edges
-            .iter()
-            .filter(|&&(a, b)| {
-                a >= range.start && a < range.end && b >= range.start && b < range.end
-            })
-            .map(|&(a, b)| (a - range.start, b - range.start))
-            .collect();
+        // Enumerate in-range edges via the CSR index, in O(E_in_range) rather
+        // than scanning the full edge list. `pos_to_id[p]` is the stable ID at
+        // position `p`; its stable neighbors are mapped back to positions via
+        // `id_to_pos` and kept only if they also fall inside `range`.
+        let mut local_edges: Vec<(usize, usize)> = Vec::new();
+        for p in range.clone() {
+            let u = pos_to_id[p];
+            for k in offsets[u]..offsets[u + 1] {
+                let v = neighbors[k];
+                let pv = id_to_pos[v];
+                if pv >= range.start && pv < range.end {
+                    local_edges.push((p - range.start, pv - range.start));
+                }
+            }
+        }
 
         // Identity permutation initially; composition of all step permutations.
         let mut net_perm: Vec<usize> = (0..len).collect();
@@ -513,9 +584,16 @@ impl<V: Ord> KnowledgeGraph<V> {
             }
         }
 
-        // Apply the net permutation to global state once, so that recursive
-        // children and the subsequent affinity pass see consistent IDs.
-        self.remap_vertices_perm(&range, &net_perm);
+        // Apply the net permutation to the position→id mapping (and its
+        // inverse) for this range, so that recursive children observe the
+        // renumbered ordering without any global edge rewrite.
+        let ids: Vec<usize> = (range.start..range.end).map(|p| pos_to_id[p]).collect();
+        for (local_old, &id) in ids.iter().enumerate() {
+            let new_pos = range.start + net_perm[local_old];
+            pos_to_id[new_pos] = id;
+            id_to_pos[id] = new_pos;
+        }
+        drop(ids);
 
         // Step 2: Get log weights
         let log_weights: Vec<_> = weights
@@ -630,6 +708,10 @@ impl<V: Ord> KnowledgeGraph<V> {
                                 boundary_threshold,
                                 min_cluster_size,
                                 exp_table,
+                                pos_to_id,
+                                id_to_pos,
+                                offsets,
+                                neighbors,
                                 accumulator,
                             );
                         } else {
@@ -653,6 +735,10 @@ impl<V: Ord> KnowledgeGraph<V> {
                 boundary_threshold,
                 min_cluster_size,
                 exp_table,
+                pos_to_id,
+                id_to_pos,
+                offsets,
+                neighbors,
                 accumulator,
             );
         }
@@ -1204,6 +1290,43 @@ mod tests {
         let g2 = build(42);
 
         assert_eq!(g1.get_clusters(), g2.get_clusters());
+    }
+
+    /// `cluster` must recover the *correct* vertex labels, not merely a valid
+    /// partition. Two disconnected cliques of very different sizes have
+    /// unambiguously different weight distributions, so the algorithm must
+    /// separate them, and `get_clusters()` must group the original node labels
+    /// (clique 0 = nodes 0..3, clique 1 = nodes 4..15) correctly.
+    ///
+    /// This guards against label-scrambling regressions (e.g. a `vertex_mapping`
+    /// that falls out of sync with `self.edges`), which a partition-validity
+    /// check alone would not detect.
+    #[test]
+    fn cluster_recover_ground_truth() {
+        use crate::graph_builder::GraphBuilder;
+        use std::collections::HashSet;
+
+        let mut builder = GraphBuilder::new(0);
+        builder.add_dense_cluster(4, 1.0).unwrap(); // original node labels 0..3
+        builder.add_dense_cluster(12, 1.0).unwrap(); // original node labels 4..15
+
+        let mut graph = builder.finalize_graph();
+        graph.shuffle_vertex_ids(0);
+        graph.cluster(0.01, 3, 0.1, 2);
+
+        let mut clusters: Vec<HashSet<usize>> = graph
+            .get_clusters()
+            .into_iter()
+            .map(|c| c.into_iter().collect())
+            .collect();
+
+        let mut expected: Vec<HashSet<usize>> = vec![(0..4).collect(), (4..16).collect()];
+
+        // Order of clusters is arbitrary, so sort by smallest element.
+        clusters.sort_by_key(|s| *s.iter().min().unwrap());
+        expected.sort_by_key(|s| *s.iter().min().unwrap());
+
+        assert_eq!(clusters, expected);
     }
 
     /// Reads just the head of the full bzip2-compressed Wikidata dump and checks
