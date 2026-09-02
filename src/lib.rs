@@ -3,6 +3,7 @@ mod autograph {
     use pyo3::exceptions::{PyIOError, PyValueError};
     use pyo3::{PyResult, prelude::*};
 
+    use autograph_core::assignment::{FrameGraph, Memberships};
     use autograph_core::graph_builder::GraphBuilder;
     use autograph_core::knowledge_graph::KnowledgeGraph;
 
@@ -192,6 +193,135 @@ mod autograph {
                     let error = format!("Error: {}", e);
                     PyErr::new::<PyValueError, _>(error)
                 })
+        }
+    }
+
+    #[pyclass(name = "FrameGraph", subclass)]
+    pub struct FrameGraphWrapper {
+        graph: FrameGraph,
+    }
+
+    #[pymethods]
+    impl FrameGraphWrapper {
+        #[new]
+        fn new() -> Self {
+            Self {
+                graph: FrameGraph::new(),
+            }
+        }
+
+        #[staticmethod]
+        #[pyo3(signature = (path, predicates, limit=None))]
+        fn from_wikidata_bz2(
+            path: &str,
+            predicates: Vec<String>,
+            limit: Option<usize>,
+        ) -> PyResult<Self> {
+            let preds: Vec<&str> = predicates.iter().map(String::as_str).collect();
+            FrameGraph::from_wikidata_multi_bz2(path, &preds, limit)
+                .map(|graph| FrameGraphWrapper { graph })
+                .map_err(|e| PyErr::new::<PyIOError, _>(format!("Error: {}", e)))
+        }
+
+        fn add_edge(&mut self, src: &str, predicate: &str, dst: &str) -> PyResult<()> {
+            self.graph
+                .add_edge(src, predicate, dst)
+                .map_err(|e| PyErr::new::<PyValueError, _>(format!("Error: {}", e)))
+        }
+
+        fn num_entities(&self) -> usize {
+            self.graph.num_entities()
+        }
+
+        fn num_predicates(&self) -> usize {
+            self.graph.num_predicates()
+        }
+
+        /// Entity QIDs in ID order, so `argmax_entities()` can be interpreted.
+        fn entity_labels(&self) -> Vec<String> {
+            self.graph.all_entity_labels().to_vec()
+        }
+
+        /// Predicate property IDs in ID order, so `argmax_predicates()` can be
+        /// interpreted.
+        fn predicate_labels(&self) -> Vec<String> {
+            self.graph.all_predicate_labels().to_vec()
+        }
+
+        fn num_edges(&self) -> usize {
+            self.graph.num_edges()
+        }
+
+        fn cluster(
+            &self,
+            factor: f64,
+            steps_before_subdivide: usize,
+            boundary_threshold: f64,
+            min_cluster_size: usize,
+        ) -> Vec<Vec<String>> {
+            self.graph.cluster(
+                factor,
+                steps_before_subdivide,
+                boundary_threshold,
+                min_cluster_size,
+            )
+        }
+
+        /// Runs EM assignment seeded by the given frames (the output of
+        /// `cluster`, or a previously-computed factorization), returning soft
+        /// memberships.
+        #[pyo3(signature = (frames, epsilon=1e-3, tol=1e-6, max_iters=100))]
+        fn em_assign(
+            &self,
+            frames: Vec<Vec<String>>,
+            epsilon: f64,
+            tol: f64,
+            max_iters: usize,
+        ) -> PyResult<MembershipsWrapper> {
+            let seed = self
+                .graph
+                .seed_from_frames(&frames)
+                .map_err(|e| PyErr::new::<PyValueError, _>(format!("Error: {}", e)))?;
+            let memberships = self.graph.em_assign(&seed, epsilon, tol, max_iters);
+            Ok(MembershipsWrapper { memberships })
+        }
+    }
+
+    #[pyclass(name = "Memberships")]
+    pub struct MembershipsWrapper {
+        memberships: Memberships,
+    }
+
+    #[pymethods]
+    impl MembershipsWrapper {
+        fn num_frames(&self) -> usize {
+            self.memberships.num_frames
+        }
+
+        fn num_entities(&self) -> usize {
+            self.memberships.num_entities
+        }
+
+        fn num_predicates(&self) -> usize {
+            self.memberships.num_predicates
+        }
+
+        #[getter]
+        fn theta(&self) -> Vec<Vec<f64>> {
+            self.memberships.theta.clone()
+        }
+
+        #[getter]
+        fn phi(&self) -> Vec<Vec<f64>> {
+            self.memberships.phi.clone()
+        }
+
+        fn argmax_entities(&self) -> Vec<usize> {
+            self.memberships.argmax_entities()
+        }
+
+        fn argmax_predicates(&self) -> Vec<usize> {
+            self.memberships.argmax_predicates()
         }
     }
 }

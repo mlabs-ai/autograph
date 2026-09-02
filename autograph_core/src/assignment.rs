@@ -37,6 +37,83 @@ pub const PEOPLE_AND_WORKS_PREDICATES: [&str; 7] = [
     "P921", // main subject
 ];
 
+/// A hard, pre-computed assignment of entities to reference frames, used to
+/// seed the (soft) Milestone-2 EM assignment without re-clustering.
+///
+/// Produced either by [`FrameGraph::cluster`] or by loading the JSON output of
+/// `python/cluster_wiki.py`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameSeed {
+    /// Number of frames (0-based indices from 0 to `num_frames - 1`).
+    pub num_frames: usize,
+    /// Entity label (QID) → frame index.
+    pub entity_to_frame: HashMap<String, usize>,
+}
+
+/// Soft memberships produced by the Milestone-2 EM assignment.
+///
+/// `theta[f][e]` is the degree to which entity `e` belongs to frame `f`, and
+/// `phi[f][p]` the degree to which predicate `p` belongs to frame `f`. Both are
+/// in `[0, 1]`, and — per `Project.md` — the sum across frames is intentionally
+/// *not* constrained (an entity may fully belong to several frames).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Memberships {
+    pub num_frames: usize,
+    pub num_entities: usize,
+    pub num_predicates: usize,
+    /// `theta[frame][entity]` in `[0, 1]`.
+    pub theta: Vec<Vec<f64>>,
+    /// `phi[frame][predicate]` in `[0, 1]`.
+    pub phi: Vec<Vec<f64>>,
+}
+
+impl Memberships {
+    /// The frame with the largest membership for each entity.
+    pub fn argmax_entities(&self) -> Vec<usize> {
+        (0..self.num_entities)
+            .map(|eid| {
+                (0..self.num_frames)
+                    .max_by(|&a, &b| {
+                        self.theta[a][eid]
+                            .partial_cmp(&self.theta[b][eid])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// The frame with the largest membership for each predicate.
+    pub fn argmax_predicates(&self) -> Vec<usize> {
+        (0..self.num_predicates)
+            .map(|pid| {
+                (0..self.num_frames)
+                    .max_by(|&a, &b| {
+                        self.phi[a][pid]
+                            .partial_cmp(&self.phi[b][pid])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// The largest absolute change in any membership between `self` and `other`
+    /// (used as the EM convergence criterion).
+    pub fn max_delta(&self, other: &Memberships) -> f64 {
+        let mut d: f64 = 0.0;
+        for f in 0..self.num_frames {
+            for e in 0..self.num_entities {
+                d = d.max((self.theta[f][e] - other.theta[f][e]).abs());
+            }
+            for p in 0..self.num_predicates {
+                d = d.max((self.phi[f][p] - other.phi[f][p]).abs());
+            }
+        }
+        d
+    }
+}
+
 /// A knowledge graph with typed edges, the foundation for frame-of-reference
 /// assignment.
 ///
@@ -138,9 +215,29 @@ impl FrameGraph {
         self.entity_labels.get(id).map(String::as_str)
     }
 
+    /// The ID of the entity with the given label, if it exists.
+    pub fn entity_id(&self, label: &str) -> Option<usize> {
+        self.entity_ids.get(label).copied()
+    }
+
     /// The label of the predicate with the given ID, if it exists.
     pub fn predicate_label(&self, id: usize) -> Option<&str> {
         self.predicate_labels.get(id).map(String::as_str)
+    }
+
+    /// The ID of the predicate with the given label, if it exists.
+    pub fn predicate_id(&self, label: &str) -> Option<usize> {
+        self.predicate_ids.get(label).copied()
+    }
+
+    /// All entity labels (QIDs) in ID order.
+    pub fn all_entity_labels(&self) -> &[String] {
+        &self.entity_labels
+    }
+
+    /// All predicate labels (property IDs) in ID order.
+    pub fn all_predicate_labels(&self) -> &[String] {
+        &self.predicate_labels
     }
 
     /// The typed edges as `(src_entity, predicate, dst_entity)` ID triples.
@@ -163,6 +260,165 @@ impl FrameGraph {
             );
         }
         graph
+    }
+
+    /// Discovers reference frames by clustering the union graph (all predicates
+    /// collapsed) with the Milestone-1 block-factorization algorithm, returning
+    /// the frames as sets of entity labels.
+    pub fn cluster(
+        &self,
+        factor: f64,
+        steps_before_subdivide: usize,
+        boundary_threshold: f64,
+        min_cluster_size: usize,
+    ) -> Vec<Vec<String>> {
+        let mut union = self.union_graph();
+        union.cluster(
+            factor,
+            steps_before_subdivide,
+            boundary_threshold,
+            min_cluster_size,
+        );
+        union.get_clusters()
+    }
+
+    /// Parses a list of reference frames from JSON, exactly as written by
+    /// `python/cluster_wiki.py` (a JSON array of arrays of entity labels).
+    pub fn frames_from_json(json: &str) -> Result<Vec<Vec<String>>, Box<dyn Error>> {
+        let frames: Vec<Vec<String>> = serde_json::from_str(json)?;
+        Ok(frames)
+    }
+
+    /// Builds a hard entity → frame seed from pre-computed frames, without
+    /// re-clustering. Fails if any entity is assigned to more than one frame.
+    pub fn seed_from_frames(&self, frames: &[Vec<String>]) -> Result<FrameSeed, Box<dyn Error>> {
+        let num_frames = frames.len();
+        let mut entity_to_frame = HashMap::new();
+        for (frame_id, frame) in frames.iter().enumerate() {
+            for entity in frame {
+                if entity_to_frame.contains_key(entity) {
+                    return Err(format!("entity {entity} appears in more than one frame").into());
+                }
+                entity_to_frame.insert(entity.clone(), frame_id);
+            }
+        }
+        Ok(FrameSeed {
+            num_frames,
+            entity_to_frame,
+        })
+    }
+
+    /// Initialises memberships from a hard frame seed: an entity's own frame
+    /// gets `theta = 1.0`, all other frames `epsilon`; predicates start uniform
+    /// (`1 / num_frames`). Entities absent from the seed start at `epsilon` in
+    /// every frame.
+    pub fn init_memberships(&self, seed: &FrameSeed, epsilon: f64) -> Memberships {
+        let nf = seed.num_frames;
+        let ne = self.num_entities();
+        let np = self.num_predicates();
+
+        let mut theta = vec![vec![epsilon; ne]; nf];
+        for (label, &frame) in &seed.entity_to_frame {
+            if frame >= nf {
+                continue;
+            }
+            if let Some(&eid) = self.entity_ids.get(label) {
+                theta[frame][eid] = 1.0;
+            }
+        }
+
+        let phi = vec![vec![1.0 / nf as f64; np]; nf];
+
+        Memberships {
+            num_frames: nf,
+            num_entities: ne,
+            num_predicates: np,
+            theta,
+            phi,
+        }
+    }
+
+    /// Performs one EM iteration: an E-step that assigns each typed edge a
+    /// responsibility over frames, and an M-step that re-estimates memberships
+    /// from those responsibilities and saturates them at 1.
+    ///
+    /// Membership update rule (currently): `theta[f][e] = min(1, raw)` where
+    /// `raw` is the sum of that frame's responsibilities over edges incident on
+    /// `e`. This keeps each entry in `[0, 1]` and does *not* normalize the sum
+    /// across frames, honouring `Project.md`'s "≤ 1, sum unconstrained"
+    /// semantics.
+    pub fn em_step(&self, m: &Memberships) -> Memberships {
+        let nf = m.num_frames;
+        let ne = m.num_entities;
+        let np = m.num_predicates;
+
+        let mut theta_raw = vec![vec![0.0f64; ne]; nf];
+        let mut phi_raw = vec![vec![0.0f64; np]; nf];
+
+        for &(u, pred, v) in &self.edges {
+            // E-step: score each frame, then normalise to a responsibility.
+            let mut scores = Vec::with_capacity(nf);
+            let mut total = 0.0f64;
+            for f in 0..nf {
+                let s = m.theta[f][u] * m.theta[f][v] * m.phi[f][pred];
+                scores.push(s);
+                total += s;
+            }
+            if total <= 0.0 {
+                continue;
+            }
+
+            // M-step accumulation: distribute the responsibility to the two
+            // endpoint entities and the predicate.
+            for f in 0..nf {
+                let gamma = scores[f] / total;
+                theta_raw[f][u] += gamma;
+                theta_raw[f][v] += gamma;
+                phi_raw[f][pred] += gamma;
+            }
+        }
+
+        let mut theta = vec![vec![0.0f64; ne]; nf];
+        for f in 0..nf {
+            for e in 0..ne {
+                theta[f][e] = theta_raw[f][e].min(1.0);
+            }
+        }
+        let mut phi = vec![vec![0.0f64; np]; nf];
+        for f in 0..nf {
+            for p in 0..np {
+                phi[f][p] = phi_raw[f][p].min(1.0);
+            }
+        }
+
+        Memberships {
+            num_frames: nf,
+            num_entities: ne,
+            num_predicates: np,
+            theta,
+            phi,
+        }
+    }
+
+    /// Runs the EM assignment to convergence (or the iteration budget) and
+    /// returns the soft memberships.
+    pub fn em_assign(
+        &self,
+        seed: &FrameSeed,
+        epsilon: f64,
+        tol: f64,
+        max_iters: usize,
+    ) -> Memberships {
+        let mut m = self.init_memberships(seed, epsilon);
+        for _ in 0..max_iters {
+            let next = self.em_step(&m);
+            let delta = m.max_delta(&next);
+            m = next;
+            if delta < tol {
+                break;
+            }
+        }
+        m
     }
 
     /// Builds a `FrameGraph` from a Wikidata JSON dump, ingesting **multiple**
@@ -254,7 +510,26 @@ impl FrameGraph {
 
 #[cfg(test)]
 mod tests {
-    use super::FrameGraph;
+    use super::{FrameGraph, FrameSeed};
+
+    fn two_clique_graph() -> FrameGraph {
+        let mut g = FrameGraph::new();
+        for i in 0..4 {
+            for j in 0..4 {
+                if i != j {
+                    g.add_edge(&format!("E{i}"), "P", &format!("E{j}")).unwrap();
+                }
+            }
+        }
+        for i in 4..16 {
+            for j in 4..16 {
+                if i != j {
+                    g.add_edge(&format!("E{i}"), "P", &format!("E{j}")).unwrap();
+                }
+            }
+        }
+        g
+    }
 
     #[test]
     fn empty() {
@@ -393,5 +668,199 @@ mod tests {
         // Only the first two entities (Q1, Q2) are read.
         // Entities: Q1, Q2, Q10, Q20, Q30, Q11, Q40, Q50 = 8.
         assert_eq!(graph.num_entities(), 8);
+    }
+
+    #[test]
+    fn cluster_separates_two_disconnected_cliques() {
+        let mut g = FrameGraph::new();
+        // Clique 1: entities E0..E3 (4 nodes), fully connected.
+        for i in 0..4 {
+            for j in 0..4 {
+                if i != j {
+                    g.add_edge(&format!("E{i}"), "P", &format!("E{j}")).unwrap();
+                }
+            }
+        }
+        // Clique 2: entities E4..E15 (12 nodes), fully connected.
+        for i in 4..16 {
+            for j in 4..16 {
+                if i != j {
+                    g.add_edge(&format!("E{i}"), "P", &format!("E{j}")).unwrap();
+                }
+            }
+        }
+
+        let frames = g.cluster(0.01, 3, 0.1, 2);
+
+        assert_eq!(frames.len(), 2, "expected two frames, got {frames:?}");
+        let mut sizes: Vec<usize> = frames.iter().map(Vec::len).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![4, 12]);
+    }
+
+    #[test]
+    fn frames_round_trip_through_json() {
+        let g = two_clique_graph();
+        let frames = g.cluster(0.01, 3, 0.1, 2);
+
+        // Serialize like cluster_wiki.py, then parse back.
+        let json = serde_json::to_string(&frames).unwrap();
+        let parsed = FrameGraph::frames_from_json(&json).unwrap();
+
+        assert_eq!(parsed, frames);
+    }
+
+    #[test]
+    fn seed_from_frames_maps_entities() {
+        let g = two_clique_graph();
+        let frames = g.cluster(0.01, 3, 0.1, 2);
+        let seed = g.seed_from_frames(&frames).unwrap();
+
+        assert_eq!(seed.num_frames, 2);
+        // Every entity is assigned to exactly one frame.
+        assert_eq!(seed.entity_to_frame.len(), 16);
+        // The two cliques land in different frames.
+        assert_ne!(seed.entity_to_frame["E0"], seed.entity_to_frame["E4"]);
+    }
+
+    #[test]
+    fn seed_from_frames_rejects_duplicate_entity() {
+        let g = FrameGraph::new();
+        let frames = vec![
+            vec!["E0".to_string()],
+            vec!["E0".to_string(), "E1".to_string()],
+        ];
+        assert!(g.seed_from_frames(&frames).is_err());
+    }
+
+    /// Two disjoint "regimes" plus a bridge entity:
+    ///   frame 0 = A0..A9 fully connected via predicate PA,
+    ///   frame 1 = B0..B9 fully connected via predicate PB,
+    ///   bridge X connects to A0 (PA) and B0 (PB).
+    /// The seed assigns A* -> 0 and B* -> 1 (X is unseeded).
+    fn two_regime_graph_and_seed() -> (FrameGraph, FrameSeed) {
+        use std::collections::HashMap;
+
+        let mut g = FrameGraph::new();
+        for i in 0..10 {
+            for j in 0..10 {
+                if i != j {
+                    g.add_edge(&format!("A{i}"), "PA", &format!("A{j}"))
+                        .unwrap();
+                    g.add_edge(&format!("B{i}"), "PB", &format!("B{j}"))
+                        .unwrap();
+                }
+            }
+        }
+        g.add_edge("X", "PA", "A0").unwrap();
+        g.add_edge("X", "PB", "B0").unwrap();
+
+        let mut entity_to_frame = HashMap::new();
+        for i in 0..10 {
+            entity_to_frame.insert(format!("A{i}"), 0);
+            entity_to_frame.insert(format!("B{i}"), 1);
+        }
+        let seed = FrameSeed {
+            num_frames: 2,
+            entity_to_frame,
+        };
+        (g, seed)
+    }
+
+    #[test]
+    fn init_memberships_seeds_theta() {
+        let (g, seed) = two_regime_graph_and_seed();
+        let m = g.init_memberships(&seed, 1e-3);
+
+        let a0 = g.entity_id("A0").unwrap();
+        let b0 = g.entity_id("B0").unwrap();
+        let x = g.entity_id("X").unwrap();
+
+        // Seeded entity: own frame = 1, other frame = epsilon.
+        assert_eq!(m.theta[0][a0], 1.0);
+        assert_eq!(m.theta[1][a0], 1e-3);
+        assert_eq!(m.theta[1][b0], 1.0);
+        assert_eq!(m.theta[0][b0], 1e-3);
+        // Unseeded entity: epsilon everywhere.
+        assert_eq!(m.theta[0][x], 1e-3);
+        assert_eq!(m.theta[1][x], 1e-3);
+        // Predicates start uniform.
+        let pa = g.predicate_id("PA").unwrap();
+        assert_eq!(m.phi[0][pa], 0.5);
+        assert_eq!(m.phi[1][pa], 0.5);
+    }
+
+    #[test]
+    fn em_keeps_memberships_within_unit_interval() {
+        let (g, seed) = two_regime_graph_and_seed();
+        let m = g.em_assign(&seed, 1e-3, 1e-9, 50);
+
+        for f in 0..m.num_frames {
+            for e in 0..m.num_entities {
+                let t = m.theta[f][e];
+                assert!(
+                    (0.0..=1.0).contains(&t),
+                    "theta[{f}][{e}] = {t} out of [0,1]"
+                );
+            }
+            for p in 0..m.num_predicates {
+                let phi = m.phi[f][p];
+                assert!(
+                    (0.0..=1.0).contains(&phi),
+                    "phi[{f}][{p}] = {phi} out of [0,1]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn em_is_deterministic() {
+        let (g, seed) = two_regime_graph_and_seed();
+        let m1 = g.em_assign(&seed, 1e-3, 1e-9, 50);
+        let m2 = g.em_assign(&seed, 1e-3, 1e-9, 50);
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn em_recovers_ground_truth_frames() {
+        let (g, seed) = two_regime_graph_and_seed();
+        let m = g.em_assign(&seed, 1e-3, 1e-9, 50);
+        let argmax = m.argmax_entities();
+
+        for i in 0..10 {
+            let a = g.entity_id(&format!("A{i}")).unwrap();
+            let b = g.entity_id(&format!("B{i}")).unwrap();
+            assert_eq!(argmax[a], 0, "entity A{i} should be in frame 0");
+            assert_eq!(argmax[b], 1, "entity B{i} should be in frame 1");
+        }
+    }
+
+    #[test]
+    fn em_concentrates_predicates() {
+        let (g, seed) = two_regime_graph_and_seed();
+        let m = g.em_assign(&seed, 1e-3, 1e-9, 50);
+        let argmax = m.argmax_predicates();
+
+        let pa = g.predicate_id("PA").unwrap();
+        let pb = g.predicate_id("PB").unwrap();
+        assert_eq!(argmax[pa], 0, "predicate PA should be frame 0");
+        assert_eq!(argmax[pb], 1, "predicate PB should be frame 1");
+    }
+
+    #[test]
+    fn bridge_entity_belongs_to_multiple_frames() {
+        let (g, seed) = two_regime_graph_and_seed();
+        let m = g.em_assign(&seed, 1e-3, 1e-9, 50);
+        let x = g.entity_id("X").unwrap();
+
+        // X bridges both regimes, so its membership must be non-trivial in both
+        // frames, and the sum is allowed to exceed 1 (no sum normalisation).
+        assert!(m.theta[0][x] > 0.5, "X should belong to frame 0");
+        assert!(m.theta[1][x] > 0.5, "X should belong to frame 1");
+        assert!(
+            m.theta[0][x] + m.theta[1][x] > 1.0,
+            "sum of X's memberships should exceed 1, got {:.3}",
+            m.theta[0][x] + m.theta[1][x]
+        );
     }
 }
