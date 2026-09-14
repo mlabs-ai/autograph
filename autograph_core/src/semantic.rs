@@ -28,6 +28,9 @@ pub struct Config {
     pub max_df_frac: f64,
     pub max_picks: usize,
     pub max_steps_cluster: usize,
+    /// If true, qualities (P31/P106) are excluded from the split & stop logic and
+    /// used only to *evaluate* the resulting clusters (non-circular comparison).
+    pub edges_only: bool,
     /// Nodes at least this many members recurse over their children in parallel.
     pub parallel_min: usize,
 }
@@ -44,6 +47,7 @@ impl Default for Config {
             max_df_frac: 0.1,
             max_picks: 10,
             max_steps_cluster: 100_000,
+            edges_only: false,
             parallel_min: 20_000,
         }
     }
@@ -290,7 +294,9 @@ impl<'a> Solver<'a> {
             let qual_cov = self.union_coverage(members, &qual_rows, true);
             let edge_cov = self.union_coverage(members, &edge_rows, false);
 
-            let q_ok = qual_cov >= self.cfg.coverage_target && self.specific(&qual_rows);
+            let q_ok = !self.cfg.edges_only
+                && qual_cov >= self.cfg.coverage_target
+                && self.specific(&qual_rows);
             let e_ok = edge_cov >= self.cfg.coverage_target && self.specific(&edge_rows);
 
             if q_ok || e_ok {
@@ -425,13 +431,21 @@ impl<'a> Solver<'a> {
         n: usize,
     ) -> HashMap<u32, f64> {
         let mut cands: Vec<(f64, u32)> = Vec::new();
-        for &k in q_touched.iter().chain(e_touched.iter()) {
+        let mut consider = |k: u32| {
             let c = scratch.counts[k as usize] as usize;
             if c < self.cfg.min_size || c > n - self.cfg.min_size {
-                continue;
+                return;
             }
             let dfv = self.model.df[k as usize] as f64;
             cands.push((c as f64 * idf(dfv, self.model.num_entities), k));
+        };
+        for &k in e_touched {
+            consider(k);
+        }
+        if !self.cfg.edges_only {
+            for &k in q_touched {
+                consider(k);
+            }
         }
         cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
         cands.truncate(self.cfg.fanout);
@@ -444,11 +458,13 @@ impl<'a> Solver<'a> {
         for &m in members {
             let mut best_key: Option<u32> = None;
             let mut best_score: f64 = -1.0;
-            for &k in &self.model.qkeys[m as usize] {
-                if let Some(&s) = split_keys.get(&k) {
-                    if s > best_score {
-                        best_score = s;
-                        best_key = Some(k);
+            if !self.cfg.edges_only {
+                for &k in &self.model.qkeys[m as usize] {
+                    if let Some(&s) = split_keys.get(&k) {
+                        if s > best_score {
+                            best_score = s;
+                            best_key = Some(k);
+                        }
                     }
                 }
             }
