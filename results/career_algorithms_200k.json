@@ -1,0 +1,350 @@
+{
+  "num_entities": 199999,
+  "num_vertices": 293207,
+  "edge_predicates": [
+    "P39",
+    "P69",
+    "P108",
+    "P463",
+    "P1344",
+    "P54",
+    "P102",
+    "P101"
+  ],
+  "quality_predicates": [
+    "P31",
+    "P106"
+  ],
+  "algorithms": [
+    {
+      "algorithm": "semantic",
+      "n_clusters": 816,
+      "n_entities": 199999,
+      "coverage": 0.9997,
+      "mean_size": 245.0,
+      "max_size": 15877,
+      "mean_quality_coverage": 0.6881,
+      "mean_edge_coverage": 0.3278,
+      "mean_num_qualities": 3.98,
+      "mean_num_edges": 5.15,
+      "time_s": 2.5,
+      "top": [
+        {
+          "size": 601,
+          "quality": "P106:Q36180",
+          "quality_frac": 1.0,
+          "quality_lift": 11.61,
+          "edge": "P101->Q7163",
+          "edge_frac": 0.057
+        },
+        {
+          "size": 925,
+          "quality": "P106:Q82955",
+          "quality_frac": 1.0,
+          "quality_lift": 7.08,
+          "edge": "P102->Q29468",
+          "edge_frac": 1.0
+        },
+        {
+          "size": 746,
+          "quality": "P106:Q47064",
+          "quality_frac": 1.0,
+          "quality_lift": 45.18,
+          "edge": "P39->Q20056508",
+          "edge_frac": 0.212
+        },
+        {
+          "size": 3052,
+          "quality": "P106:Q40348",
+          "quality_frac": 1.0,
+          "quality_lift": 41.93,
+          "edge": "P39->Q13218630",
+          "edge_frac": 0.247
+        },
+        {
+          "size": 108,
+          "quality": "P106:Q201788",
+          "quality_frac": 1.0,
+          "quality_lift": 49.58,
+          "edge": "P101->Q309",
+          "edge_frac": 0.083
+        }
+      ]
+    },
+    {
+      "algorithm": "m1",
+      "n_clusters": 889,
+      "n_entities": 199999,
+      "coverage": 0.6792,
+      "mean_size": 152.8,
+      "max_size": 37999,
+      "mean_quality_coverage": 0.904,
+      "mean_edge_coverage": 0.9524,
+      "mean_num_qualities": 3.67,
+      "mean_num_edges": 2.67,
+      "time_s": 72.7,
+      "top": [
+        {
+          "size": 37999,
+          "quality": "P106:Q19204627",
+          "quality_frac": 0.03,
+          "quality_lift": 2.69,
+          "edge": null,
+          "edge_frac": null
+        },
+        {
+          "size": 17443,
+          "quality": "P106:Q1622272",
+          "quality_frac": 0.229,
+          "quality_lift": 4.48,
+          "edge": "P102->Q29468",
+          "edge_frac": 0.064
+        },
+        {
+          "size": 10829,
+          "quality": "P106:Q11774891",
+          "quality_frac": 0.113,
+          "quality_lift": 10.15,
+          "edge": "P102->Q49762",
+          "edge_frac": 0.052
+        },
+        {
+          "size": 9343,
+          "quality": "P106:Q2309784",
+          "quality_frac": 0.033,
+          "quality_lift": 4.62,
+          "edge": "P102->Q7320",
+          "edge_frac": 0.023
+        },
+        {
+          "size": 7322,
+          "quality": "P106:Q937857",
+          "quality_frac": 0.318,
+          "quality_lift": 4.09,
+          "edge": "P39->Q81531912",
+          "edge_frac": 0.038
+        }
+      ]
+    },
+    {
+      "algorithm": "louvain",
+      "n_clusters": 1678,
+      "n_entities": 199999,
+      "coverage": 0.6499,
+      "mean_size": 77.5,
+      "max_size": 22023,
+      "mean_quality_coverage": 0.9456,
+      "mean_edge_coverage": 0.9797,
+      "mean_num_qualities": 3.27,
+      "mean_num_edges": 2.51,
+      "time_s": 4.0,
+      "top": [
+        {
+          "size": 22023,
+          "quality": "P106:Q1622272",
+          "quality_frac": 0.314,
+          "quality_lift": 6.13,
+          "edge": "P463->Q463303",
+          "edge_frac": 0.041
+        },
+        {
+          "size": 11776,
+          "quality": "P106:Q19204627",
+          "quality_frac": 0.164,
+          "quality_lift": 14.89,
+          "edge": "P102->Q29552",
+          "edge_frac": 0.156
+        },
+        {
+          "size": 5248,
+          "quality": "P106:Q12299841",
+          "quality_frac": 0.159,
+          "quality_lift": 20.54,
+          "edge": "P39->Q18952564",
+          "edge_frac": 0.075
+        },
+        {
+          "size": 5023,
+          "quality": "P106:Q36834",
+          "quality_frac": 0.256,
+          "quality_lift": 8.32,
+          "edge": "P101->Q638",
+          "edge_frac": 0.094
+        },
+        {
+          "size": 4883,
+          "quality": "P106:Q82955",
+          "quality_frac": 0.682,
+          "quality_lift": 4.83,
+          "edge": "P102->Q49768",
+          "edge_frac": 0.193
+        }
+      ]
+    },
+    {
+      "algorithm": "leiden",
+      "n_clusters": 1575,
+      "n_entities": 199999,
+      "coverage": 0.6501,
+      "mean_size": 82.5,
+      "max_size": 14248,
+      "mean_quality_coverage": 0.9446,
+      "mean_edge_coverage": 0.9791,
+      "mean_num_qualities": 3.15,
+      "mean_num_edges": 2.4,
+      "time_s": 3.0,
+      "top": [
+        {
+          "size": 14248,
+          "quality": "P106:Q40348",
+          "quality_frac": 0.14,
+          "quality_lift": 5.89,
+          "edge": "P102->Q29552",
+          "edge_frac": 0.133
+        },
+        {
+          "size": 12059,
+          "quality": "P106:Q1622272",
+          "quality_frac": 0.391,
+          "quality_lift": 7.65,
+          "edge": "P463->Q543804",
+          "edge_frac": 0.043
+        },
+        {
+          "size": 7425,
+          "quality": "P106:Q12299841",
+          "quality_frac": 0.118,
+          "quality_lift": 15.32,
+          "edge": "P463->Q123885",
+          "edge_frac": 0.062
+        },
+        {
+          "size": 5020,
+          "quality": "P106:Q82955",
+          "quality_frac": 0.403,
+          "quality_lift": 2.85,
+          "edge": "P39->Q3044918",
+          "edge_frac": 0.165
+        },
+        {
+          "size": 4944,
+          "quality": "P106:Q82955",
+          "quality_frac": 0.701,
+          "quality_lift": 4.97,
+          "edge": "P102->Q7320",
+          "edge_frac": 0.199
+        }
+      ]
+    },
+    {
+      "algorithm": "infomap",
+      "n_clusters": 8433,
+      "n_entities": 199999,
+      "coverage": 0.6441,
+      "mean_size": 15.3,
+      "max_size": 2070,
+      "mean_quality_coverage": 0.9247,
+      "mean_edge_coverage": 0.9923,
+      "mean_num_qualities": 6.43,
+      "mean_num_edges": 7.34,
+      "time_s": 92.0,
+      "top": [
+        {
+          "size": 2070,
+          "quality": "P106:Q82955",
+          "quality_frac": 0.938,
+          "quality_lift": 6.64,
+          "edge": "P102->Q49768",
+          "edge_frac": 0.371
+        },
+        {
+          "size": 1810,
+          "quality": "P106:Q937857",
+          "quality_frac": 0.995,
+          "quality_lift": 12.79,
+          "edge": "P54->Q48948",
+          "edge_frac": 0.062
+        },
+        {
+          "size": 1687,
+          "quality": "P106:Q11513337",
+          "quality_frac": 0.223,
+          "quality_lift": 23.11,
+          "edge": "P1344->Q8567",
+          "edge_frac": 0.372
+        },
+        {
+          "size": 1545,
+          "quality": "P106:Q82955",
+          "quality_frac": 0.931,
+          "quality_lift": 6.59,
+          "edge": "P39->Q13218630",
+          "edge_frac": 0.549
+        },
+        {
+          "size": 1274,
+          "quality": "P106:Q10871364",
+          "quality_frac": 0.972,
+          "quality_lift": 84.9,
+          "edge": "P54->Q650840",
+          "edge_frac": 0.146
+        }
+      ]
+    },
+    {
+      "algorithm": "fastgreedy",
+      "n_clusters": 2225,
+      "n_entities": 199999,
+      "coverage": 0.6493,
+      "mean_size": 58.4,
+      "max_size": 23194,
+      "mean_quality_coverage": 0.9517,
+      "mean_edge_coverage": 0.9877,
+      "mean_num_qualities": 3.82,
+      "mean_num_edges": 3.25,
+      "time_s": 209.1,
+      "top": [
+        {
+          "size": 23194,
+          "quality": "P106:Q1622272",
+          "quality_frac": 0.263,
+          "quality_lift": 5.13,
+          "edge": "P102->Q7320",
+          "edge_frac": 0.043
+        },
+        {
+          "size": 21662,
+          "quality": "P106:Q19204627",
+          "quality_frac": 0.096,
+          "quality_lift": 8.68,
+          "edge": "P102->Q29552",
+          "edge_frac": 0.089
+        },
+        {
+          "size": 14938,
+          "quality": "P106:Q937857",
+          "quality_frac": 0.946,
+          "quality_lift": 12.16,
+          "edge": null,
+          "edge_frac": null
+        },
+        {
+          "size": 13713,
+          "quality": "P106:Q1028181",
+          "quality_frac": 0.169,
+          "quality_lift": 5.23,
+          "edge": "P102->Q79854",
+          "edge_frac": 0.105
+        },
+        {
+          "size": 13197,
+          "quality": "P106:Q82955",
+          "quality_frac": 0.514,
+          "quality_lift": 3.64,
+          "edge": "P102->Q49768",
+          "edge_frac": 0.074
+        }
+      ]
+    }
+  ]
+}

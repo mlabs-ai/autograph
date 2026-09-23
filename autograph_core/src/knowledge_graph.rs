@@ -2,9 +2,9 @@ use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
-use std::fs::{create_dir_all, File};
+use std::fs::{File, create_dir_all};
 use std::io::{BufRead, BufReader, Write};
-use std::ops::{Range};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -21,30 +21,30 @@ use serde_json::Value;
 enum ClusterType {
     Strong,
     Border,
-    Weak
+    Weak,
 }
 
 #[derive(Debug)]
 struct Cluster {
     pub cluster_type: ClusterType,
-    pub range: Range<usize>
+    pub range: Range<usize>,
 }
 
 impl Cluster {
     pub fn new(cluster_type: ClusterType, range: Range<usize>) -> Self {
         Self {
             cluster_type,
-            range
+            range,
         }
     }
 }
 
 /// `KnowledgeGraph` stores a sparse graph in an edge list format. For now, the
 /// graph will be undirected and uncolored -- these features will be added later.
-/// 
+///
 /// Vertices can be represented by anything hashable (e.g., a `String`), but in
 /// the internal edge representations, they will be stored as `usize` integer
-/// IDs that are mapped by `vertex_mapping`. Edges will be stored in a `Vec`, 
+/// IDs that are mapped by `vertex_mapping`. Edges will be stored in a `Vec`,
 /// where each item is a tuple `(usize, usize)`, where the first item is the ID
 /// of the vertex at one end of the edge, and the second item is the ID of the
 /// other vertex.
@@ -52,7 +52,7 @@ impl Cluster {
 pub struct KnowledgeGraph<V: Ord> {
     edges: Vec<(usize, usize)>,
     vertex_mapping: BTreeMap<V, usize>,
-    clusters: Vec<Range<usize>>
+    clusters: Vec<Range<usize>>,
 }
 
 impl<V: Ord> PartialEq for KnowledgeGraph<V> {
@@ -70,21 +70,20 @@ impl<V: Ord> KnowledgeGraph<V> {
         Self {
             edges: Vec::new(),
             vertex_mapping: BTreeMap::new(),
-            clusters: Vec::new()
+            clusters: Vec::new(),
         }
     }
 
     /// Generates an edge list representation for this graph
-    pub fn edge_list(&self) -> Vec<(V, V)> 
-    where 
-        V: Clone
+    pub fn edge_list(&self) -> Vec<(V, V)>
+    where
+        V: Clone,
     {
-        let id_to_name: HashMap<_, _> = self.vertex_mapping
-            .iter()
-            .map(|(v, &id)| (id, v))
-            .collect();
+        let id_to_name: HashMap<_, _> =
+            self.vertex_mapping.iter().map(|(v, &id)| (id, v)).collect();
 
-        self.edges.iter()
+        self.edges
+            .iter()
             .map(|(id1, id2)| (id_to_name[id1].clone(), id_to_name[id2].clone()))
             .collect()
     }
@@ -100,14 +99,12 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Adds the given vertex to the `vertex_mapping` if not already present.
-    /// If it is already present, no vertex will be added. Either way, the 
+    /// If it is already present, no vertex will be added. Either way, the
     /// `usize` integer ID used to represent the vertex in edges will be
     /// returned.
     pub fn add_vertex(&mut self, vertex: V) -> usize {
         let num_vertices = self.vertex_mapping.len();
-        *self.vertex_mapping
-            .entry(vertex)
-            .or_insert(num_vertices)
+        *self.vertex_mapping.entry(vertex).or_insert(num_vertices)
     }
 
     /// Gets the `usize` integer ID used to represent the given vertex in edges,
@@ -162,48 +159,127 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     /// Performs one iteration of the block factorization algorithm.
-    pub fn cluster_step(
-        &mut self, 
-        factor: f64, 
-        range: &Range<usize>
-    ) -> Vec<f64> {
+    ///
+    /// This builds a fresh `exp` lookup table on each call. The `cluster`
+    /// method uses `cluster_step_table` directly so the table is built only
+    /// once, but this public entry point remains for callers (e.g. the
+    /// visualization notebook) that drive individual steps.
+    pub fn cluster_step(&mut self, factor: f64, range: &Range<usize>) -> Vec<f64> {
+        let exp_table: Vec<f64> = (0..self.vertex_mapping.len())
+            .map(|i| (-factor * i as f64).exp())
+            .collect();
+        self.cluster_step_table(range, &exp_table)
+    }
+
+    /// Core of `cluster_step`, using a precomputed table where
+    /// `exp_table[k] == exp(-factor * k)`. The `exp` argument in the original
+    /// algorithm was always `-factor * (local index)`, so replacing the
+    /// per-edge transcendental `exp` with two array lookups is an exact
+    /// (bit-for-bit) optimization that removes a dominant cost.
+    fn cluster_step_table(&mut self, range: &Range<usize>, exp_table: &[f64]) -> Vec<f64> {
+        // Extract the in-range edges (local coordinates), compute weights + the
+        // sorting permutation, then apply it globally once.
+        let local_edges: Vec<(usize, usize)> = self
+            .edges
+            .iter()
+            .filter(|&&(a, b)| {
+                a >= range.start && a < range.end && b >= range.start && b < range.end
+            })
+            .map(|&(a, b)| (a - range.start, b - range.start))
+            .collect();
+
+        let (weights, perm) =
+            Self::compute_weights(&local_edges, range.end - range.start, exp_table);
+
+        if let Some(perm) = perm {
+            self.remap_vertices_perm(range, &perm);
+        }
+
+        weights
+    }
+
+    /// Given edges expressed in `0..len` local coordinates, compute the
+    /// vertex weights (`weights[index]`), sort them descending, and return the
+    /// sorted weights plus the corresponding permutation
+    /// (`perm[old_local] == new_local`).
+    ///
+    /// This is a pure function of its arguments, which lets callers drive
+    /// multiple steps against a *local* edge list without touching global
+    /// state. Returns `None` for the permutation when there are no edges (and
+    /// hence no ordering to impose).
+    fn compute_weights(
+        local_edges: &[(usize, usize)],
+        len: usize,
+        exp_table: &[f64],
+    ) -> (Vec<f64>, Option<Vec<usize>>) {
         // Get the weight per vertex
-        let mut weights = vec![0.0; range.end - range.start];
+        let mut weights = vec![0.0; len];
 
         let mut num_connections = 0;
-        for &(id1, id2) in &self.edges {
-            if !range.contains(&id1) || !range.contains(&id2) {
-                continue;
-            }
-
+        for &(a, b) in local_edges {
             num_connections += 1;
-
-            let id1 = id1 - range.start;
-            let id2 = id2 - range.start;
-
-            weights[id1] += (-factor * id2 as f64).exp();
-            weights[id2] += (-factor * id1 as f64).exp();
+            weights[a] += exp_table[b];
+            weights[b] += exp_table[a];
         }
 
         // If all weights are 0, stop early
         if num_connections == 0 {
-            return weights;
+            return (weights, None);
         }
 
         // Order by weight descending. Equal weights are a virtual impossibility,
-        // so we can use an unstable sort to save memory
-        let mut weights: Vec<_> = weights.into_iter().enumerate().collect();
-        weights.par_sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        // so we can use an unstable sort to save memory. Below a threshold the
+        // rayon-parallel sort overhead outweighs its benefit, so fall back to a
+        // serial sort for the many small sub-ranges seen during recursion.
+        const PARALLEL_SORT_THRESHOLD: usize = 4096;
 
-        // Get new mapping and apply it
-        let new_mapping = weights.iter()
-            .enumerate()
-            .filter(|(new, (old, _))| new != old)
-            .map(|(new, &(old, _))| (old + range.start, new + range.start))
-            .collect();
-        self.remap_vertices(&new_mapping);
+        let mut indexed: Vec<_> = weights.iter().copied().enumerate().collect();
+        if indexed.len() >= PARALLEL_SORT_THRESHOLD {
+            indexed.par_sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        } else {
+            indexed.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+        }
 
-        weights.into_iter().map(|(_, w)| w).collect()
+        // Build an array-based permutation (`perm[old_local] == new_local`).
+        let mut perm = vec![0usize; len];
+        for (new, &(old, _)) in indexed.iter().enumerate() {
+            perm[old] = new;
+        }
+
+        let sorted_weights = indexed.into_iter().map(|(_, w)| w).collect();
+        (sorted_weights, Some(perm))
+    }
+
+    /// Applies a local permutation of vertex IDs within `range`, where
+    /// `perm[old_id - range.start]` gives the new local ID. This is a fast,
+    /// allocation-free (`HashMap`-free) special case of the more general
+    /// `remap_vertices`, for the contiguous-range permutation that
+    /// `cluster_step_table` produces.
+    fn remap_vertices_perm(&mut self, range: &Range<usize>, perm: &[usize]) {
+        let start = range.start;
+        for id in self.vertex_mapping.values_mut() {
+            if *id >= start && *id < range.end {
+                *id = start + perm[*id - start];
+            }
+        }
+        self.remap_edges_perm(range, perm);
+    }
+
+    /// Rewrites only `self.edges` under the given local permutation, leaving
+    /// `vertex_mapping` untouched. During the clustering recursion,
+    /// `vertex_mapping` is never read, so deferring its update to the final
+    /// `remap_vertices` call avoids an O(V log V) `BTreeMap` scan per recursion
+    /// node.
+    fn remap_edges_perm(&mut self, range: &Range<usize>, perm: &[usize]) {
+        let start = range.start;
+        for (src, dst) in self.edges.iter_mut() {
+            if *src >= start && *src < range.end {
+                *src = start + perm[*src - start];
+            }
+            if *dst >= start && *dst < range.end {
+                *dst = start + perm[*dst - start];
+            }
+        }
     }
 
     pub fn cluster(
@@ -211,10 +287,13 @@ impl<V: Ord> KnowledgeGraph<V> {
         factor: f64,
         steps_before_subdivide: usize,
         mut boundary_threshold: f64,
-        min_cluster_size: usize
+        min_cluster_size: usize,
     ) {
         // Perform sanity checks
-        assert!(!self.vertex_mapping.is_empty(), "Cannot cluster an empty graph");
+        assert!(
+            !self.vertex_mapping.is_empty(),
+            "Cannot cluster an empty graph"
+        );
         assert!(min_cluster_size > 0, "Min cluster size cannot be 0");
 
         // Ensure boundary threshold is negative
@@ -249,18 +328,70 @@ impl<V: Ord> KnowledgeGraph<V> {
                 self.clusters.push(0..num_nodes);
             }
         }
-
         // Otherwise, continue to cluster
         else {
+            // Precompute the exp lookup table once; `cluster_step_table` index
+            // `k` uses `exp_table[k] == exp(-factor * k)`. The largest local
+            // index seen is `num_nodes - 1`, so the table covers that range.
+            let exp_table: Vec<f64> = (0..num_nodes).map(|i| (-factor * i as f64).exp()).collect();
+
+            // Position arrays: `pos_to_id[p]` is the stable vertex ID currently
+            // at position `p`, and `id_to_pos[id]` its inverse. Initially the
+            // ID space and position space coincide.
+            let mut pos_to_id: Vec<usize> = (0..num_nodes).collect();
+            let mut id_to_pos: Vec<usize> = (0..num_nodes).collect();
+
+            // Build a CSR adjacency index on *stable* IDs. This lets each
+            // recursion node enumerate its in-range edges in O(E_in_range)
+            // instead of scanning the entire edge list.
+            //
+            // `offsets` has length `num_nodes + 1`; the neighbors of stable
+            // vertex `u` are `neighbors[offsets[u]..offsets[u+1]]`.
+            let mut offsets = vec![0usize; num_nodes + 1];
+            for &(a, _) in &self.edges {
+                offsets[a + 1] += 1;
+            }
+            for i in 0..num_nodes {
+                offsets[i + 1] += offsets[i];
+            }
+            let mut neighbors = vec![0usize; self.edges.len()];
+            let mut cursor = offsets.clone();
+            for &(a, b) in &self.edges {
+                neighbors[cursor[a]] = b;
+                cursor[a] += 1;
+            }
+
             let mut clusters = Vec::new();
             self.cluster_worker(
                 0..num_nodes,
-                factor,
                 steps_before_subdivide,
                 boundary_threshold,
                 min_cluster_size,
-                &mut clusters
+                &exp_table,
+                &mut pos_to_id,
+                &mut id_to_pos,
+                &offsets,
+                &neighbors,
+                &mut clusters,
             );
+
+            // Re-materialize `self.edges` into position space once, so the
+            // subsequent affinity pass (and final remap) see consistent IDs.
+            for (a, b) in self.edges.iter_mut() {
+                *a = id_to_pos[*a];
+                *b = id_to_pos[*b];
+            }
+            // Do the same for `vertex_mapping` (label -> id): the recursion
+            // permuted positions, but `vertex_mapping` was deferred, so its
+            // values still hold pre-recursion IDs. Map them to final positions
+            // so `get_clusters()` (and the final remap) see the same ID space
+            // as `self.edges`. Disconnected nodes (ids >= num_nodes) were
+            // placed at the tail by Step 0 and are untouched by the recursion.
+            for id in self.vertex_mapping.values_mut() {
+                if *id < num_nodes {
+                    *id = id_to_pos[*id];
+                }
+            }
 
             // Get all strong cluster assignments
             let mut cluster_assignments = BTreeMap::new();
@@ -273,10 +404,10 @@ impl<V: Ord> KnowledgeGraph<V> {
                             cluster_assignments.insert(i, num_clusters);
                         }
                         num_clusters += 1;
-                    },
+                    }
                     ClusterType::Border => {
                         weak_clusters.push(cluster);
-                    },
+                    }
                     ClusterType::Weak => {
                         weak_clusters.push(cluster);
                     }
@@ -284,12 +415,11 @@ impl<V: Ord> KnowledgeGraph<V> {
             }
 
             // Identify each node that's not currently assigned a cluster
-            let mut weak_node_affinities: BTreeMap<usize, HashMap<usize, usize>> = 
-                weak_clusters
-                    .into_iter()
-                    .flat_map(|c| c.range)
-                    .map(|weak_node_id| (weak_node_id, HashMap::new()))
-                    .collect();
+            let mut weak_node_affinities: BTreeMap<usize, HashMap<usize, usize>> = weak_clusters
+                .into_iter()
+                .flat_map(|c| c.range)
+                .map(|weak_node_id| (weak_node_id, HashMap::new()))
+                .collect();
 
             // While there are nodes not assigned to a cluster...
             while !weak_node_affinities.is_empty() {
@@ -297,18 +427,18 @@ impl<V: Ord> KnowledgeGraph<V> {
 
                 // ... identify which cluster each has the highest affinity with...
                 for (v1, v2) in &self.edges {
-                    // If v1 is unclustered, but v2 is, increase v1's affinity 
+                    // If v1 is unclustered, but v2 is, increase v1's affinity
                     // for v2's cluster
-                    if let Some(cluster_counts) = weak_node_affinities.get_mut(v1) && 
-                        let Some(cluster_id) = cluster_assignments.get(v2)
+                    if let Some(cluster_counts) = weak_node_affinities.get_mut(v1)
+                        && let Some(cluster_id) = cluster_assignments.get(v2)
                     {
                         *cluster_counts.entry(*cluster_id).or_default() += 1;
                     }
 
                     // If v2 is unclustered, but v1 is, increase v2's affinity
                     // for v1's cluster
-                    if let Some(cluster_counts) = weak_node_affinities.get_mut(v2) &&
-                        let Some(cluster_id) = cluster_assignments.get(v1)
+                    if let Some(cluster_counts) = weak_node_affinities.get_mut(v2)
+                        && let Some(cluster_id) = cluster_assignments.get(v1)
                     {
                         *cluster_counts.entry(*cluster_id).or_default() += 1;
                     }
@@ -321,8 +451,7 @@ impl<V: Ord> KnowledgeGraph<V> {
                     let cluster = counts.iter().max_by_key(|(_, c)| *c);
                     if let Some((&cluster_id, _)) = cluster {
                         cluster_assignments.insert(node_id, cluster_id);
-                    }
-                    else {
+                    } else {
                         new_weak_node_affinities.insert(node_id, HashMap::new());
                     }
                 }
@@ -352,16 +481,17 @@ impl<V: Ord> KnowledgeGraph<V> {
             let mut node_start = 0;
             for cluster in cluster_groupings.values() {
                 let cluster_size = cluster.len();
-                self.clusters.push(node_start .. node_start + cluster_size);
+                self.clusters.push(node_start..node_start + cluster_size);
                 node_start += cluster_size;
             }
             for _ in weak_node_affinities.keys() {
-                self.clusters.push(node_start .. node_start + 1);
+                self.clusters.push(node_start..node_start + 1);
                 node_start += 1;
             }
 
             // Get the new mapping and apply it
-            let remapping = cluster_groupings.into_values()
+            let remapping = cluster_groupings
+                .into_values()
                 .flatten()
                 .chain(weak_node_affinities.into_keys())
                 .enumerate()
@@ -375,16 +505,20 @@ impl<V: Ord> KnowledgeGraph<V> {
     fn cluster_worker(
         &mut self,
         range: Range<usize>,
-        factor: f64,
         steps_before_subdivide: usize,
         boundary_threshold: f64,
         min_cluster_size: usize,
-        accumulator: &mut Vec<Cluster>
+        exp_table: &[f64],
+        pos_to_id: &mut Vec<usize>,
+        id_to_pos: &mut Vec<usize>,
+        offsets: &[usize],
+        neighbors: &[usize],
+        accumulator: &mut Vec<Cluster>,
     ) {
         // println!("> Running on {:?}", &range);
         // Perform a sanity check
         assert!(
-            steps_before_subdivide >= 1, 
+            steps_before_subdivide >= 1,
             "Must perform at least one subdivision step"
         );
 
@@ -395,10 +529,38 @@ impl<V: Ord> KnowledgeGraph<V> {
             return;
         }
 
-        // Step 1: Do some cluster steps
+        // Step 1: Extract the in-range edges once (local coordinates) and run
+        // the cluster steps against this local list, applying each step's
+        // sorting permutation to the local list so it stays consistent.
+        //
+        // `self.edges` is *not* mutated during the recursion: the vertex
+        // ordering is tracked separately in `pos_to_id`/`id_to_pos` (position
+        // → stable ID and its inverse). The global edge list is re-materialized
+        // once, after `cluster_worker` unwinds, in `cluster`.
+        let len = range.end - range.start;
+        // Enumerate in-range edges via the CSR index, in O(E_in_range) rather
+        // than scanning the full edge list. `pos_to_id[p]` is the stable ID at
+        // position `p`; its stable neighbors are mapped back to positions via
+        // `id_to_pos` and kept only if they also fall inside `range`.
+        let mut local_edges: Vec<(usize, usize)> = Vec::new();
+        for p in range.clone() {
+            let u = pos_to_id[p];
+            for k in offsets[u]..offsets[u + 1] {
+                let v = neighbors[k];
+                let pv = id_to_pos[v];
+                if pv >= range.start && pv < range.end {
+                    local_edges.push((p - range.start, pv - range.start));
+                }
+            }
+        }
+
+        // Identity permutation initially; composition of all step permutations.
+        let mut net_perm: Vec<usize> = (0..len).collect();
+
         let mut weights = Vec::new();
         for _ in 0..steps_before_subdivide {
-            weights = self.cluster_step(factor, &range);
+            let (w, perm) = Self::compute_weights(&local_edges, len, exp_table);
+            weights = w;
 
             // If the number of connected vertices is low, return that this is a weak cluster
             let num_connected = weights.iter().take_while(|&&w| w > 0.0).count();
@@ -407,7 +569,31 @@ impl<V: Ord> KnowledgeGraph<V> {
                 accumulator.push(Cluster::new(ClusterType::Weak, range));
                 return;
             }
+
+            if let Some(step_perm) = perm {
+                // Compose: net = step_perm ∘ net, i.e. net[x] = step_perm[net[x]].
+                for entry in net_perm.iter_mut() {
+                    *entry = step_perm[*entry];
+                }
+                // Apply step_perm to the local edge list so the next step sees
+                // the renumbered vertices.
+                for (a, b) in local_edges.iter_mut() {
+                    *a = step_perm[*a];
+                    *b = step_perm[*b];
+                }
+            }
         }
+
+        // Apply the net permutation to the position→id mapping (and its
+        // inverse) for this range, so that recursive children observe the
+        // renumbered ordering without any global edge rewrite.
+        let ids: Vec<usize> = (range.start..range.end).map(|p| pos_to_id[p]).collect();
+        for (local_old, &id) in ids.iter().enumerate() {
+            let new_pos = range.start + net_perm[local_old];
+            pos_to_id[new_pos] = id;
+            id_to_pos[id] = new_pos;
+        }
+        drop(ids);
 
         // Step 2: Get log weights
         let log_weights: Vec<_> = weights
@@ -423,13 +609,11 @@ impl<V: Ord> KnowledgeGraph<V> {
 
         // Step 3: Differentiate strong and border clusters
         let mut clusters: Vec<Cluster> = Vec::new();
-        let mut curr_cluster = 
-            if log_derivatives[0] > boundary_threshold {
-                Cluster::new(ClusterType::Strong, range.start..range.start+1)
-            }
-            else {
-                Cluster::new(ClusterType::Border, range.start..range.start+1)
-            };
+        let mut curr_cluster = if log_derivatives[0] > boundary_threshold {
+            Cluster::new(ClusterType::Strong, range.start..range.start + 1)
+        } else {
+            Cluster::new(ClusterType::Border, range.start..range.start + 1)
+        };
         for (i, d) in log_derivatives.into_iter().enumerate() {
             // `i` is the current derivative; the current node is offset by 1
             let curr_node = i + 1 + range.start;
@@ -440,16 +624,11 @@ impl<V: Ord> KnowledgeGraph<V> {
                     ClusterType::Strong => curr_cluster.range.end = curr_node + 1,
                     ClusterType::Border => {
                         clusters.push(curr_cluster);
-                        curr_cluster = Cluster::new(
-                            ClusterType::Strong, 
-                            curr_node..curr_node+1
-                        )
-                    },
-                    ClusterType::Weak => 
-                        panic!("Found weak cluster when there shouldn't be one")
+                        curr_cluster = Cluster::new(ClusterType::Strong, curr_node..curr_node + 1)
+                    }
+                    ClusterType::Weak => panic!("Found weak cluster when there shouldn't be one"),
                 }
             }
-
             // Log derivative signals border
             else {
                 match curr_cluster.cluster_type {
@@ -472,26 +651,22 @@ impl<V: Ord> KnowledgeGraph<V> {
                             // Increment current cluster
                             curr_cluster.range.end = curr_node + 1;
                         }
-
                         // Otherwise, store the old cluster and start new border
                         else {
                             clusters.push(curr_cluster);
-                            curr_cluster = Cluster::new(
-                                ClusterType::Border, 
-                                curr_node..curr_node+1
-                            )
+                            curr_cluster =
+                                Cluster::new(ClusterType::Border, curr_node..curr_node + 1)
                         }
-                    },
+                    }
                     ClusterType::Border => curr_cluster.range.end = curr_node + 1,
-                    ClusterType::Weak => 
-                        panic!("Found weak cluster when there shouldn't be one")
+                    ClusterType::Weak => panic!("Found weak cluster when there shouldn't be one"),
                 }
             }
         }
 
         // Convert last cluster to a border if it's too small
-        if curr_cluster.cluster_type == ClusterType::Strong && 
-            curr_cluster.range.end - curr_cluster.range.start < min_cluster_size
+        if curr_cluster.cluster_type == ClusterType::Strong
+            && curr_cluster.range.end - curr_cluster.range.start < min_cluster_size
         {
             curr_cluster.cluster_type = ClusterType::Border;
 
@@ -519,7 +694,6 @@ impl<V: Ord> KnowledgeGraph<V> {
         if log_weights.len() == weights.len() && num_strong_clusters <= 1 {
             accumulator.append(&mut clusters);
         }
-
         // ... otherwise, recurse on the strong clusters
         else {
             let mut num_strong_seen = 0;
@@ -529,15 +703,18 @@ impl<V: Ord> KnowledgeGraph<V> {
                     ClusterType::Strong => {
                         if num_strong_clusters > 1 {
                             self.cluster_worker(
-                                cluster.range, 
-                                factor, 
-                                steps_before_subdivide, 
-                                boundary_threshold, 
+                                cluster.range,
+                                steps_before_subdivide,
+                                boundary_threshold,
                                 min_cluster_size,
-                                accumulator
+                                exp_table,
+                                pos_to_id,
+                                id_to_pos,
+                                offsets,
+                                neighbors,
+                                accumulator,
                             );
-                        }
-                        else {
+                        } else {
                             accumulator.push(cluster);
                         }
 
@@ -545,35 +722,37 @@ impl<V: Ord> KnowledgeGraph<V> {
                         if num_strong_seen >= 1 {
                             break;
                         }
-                    },
-                    ClusterType::Weak => 
-                        panic!("Found weak cluster when there shouldn't be one")
+                    }
+                    ClusterType::Weak => panic!("Found weak cluster when there shouldn't be one"),
                 }
             }
 
             // Recurse on last portion of nodes
             let last_cluster_end = accumulator.last().unwrap().range.end;
             self.cluster_worker(
-                last_cluster_end..range.end, 
-                factor, 
-                steps_before_subdivide, 
-                boundary_threshold, 
+                last_cluster_end..range.end,
+                steps_before_subdivide,
+                boundary_threshold,
                 min_cluster_size,
-                accumulator
+                exp_table,
+                pos_to_id,
+                id_to_pos,
+                offsets,
+                neighbors,
+                accumulator,
             );
         }
     }
 
     /// Write the graph as a Graphviz dot file to the given path.
-    pub fn write_to_dot_file<P>(&self, path: P) -> Result<(), Box<dyn Error>> 
-    where 
+    pub fn write_to_dot_file<P>(&self, path: P) -> Result<(), Box<dyn Error>>
+    where
         P: AsRef<Path>,
-        V: Display
+        V: Display,
     {
         // Ensure vertices are written in order of IDs
-        let id_to_vertex_mapping: BTreeMap<_, _> = self.vertex_mapping.iter()
-            .map(|(v, &id)| (id, v))
-            .collect();
+        let id_to_vertex_mapping: BTreeMap<_, _> =
+            self.vertex_mapping.iter().map(|(v, &id)| (id, v)).collect();
 
         // Open file and write file header
         if let Some(parent_dir) = path.as_ref().parent() {
@@ -621,10 +800,11 @@ impl<V: Ord> KnowledgeGraph<V> {
     }
 
     pub fn get_clusters(&self) -> Vec<Vec<V>>
-    where 
-        V: Clone
+    where
+        V: Clone,
     {
-        let id2label: BTreeMap<_, _> = self.vertex_mapping
+        let id2label: BTreeMap<_, _> = self
+            .vertex_mapping
             .iter()
             .map(|(v, &i)| (i, v.clone()))
             .collect();
@@ -644,9 +824,9 @@ impl<V: Ord> Default for KnowledgeGraph<V> {
 
 impl KnowledgeGraph<String> {
     /// Read the graph from the given dot file.
-    pub fn from_dot_file<P>(path: P) -> Result<Self, Box<dyn Error>> 
-    where 
-        P: AsRef<Path>
+    pub fn from_dot_file<P>(path: P) -> Result<Self, Box<dyn Error>>
+    where
+        P: AsRef<Path>,
     {
         let edge_regex = Regex::new(r"^\s*([^\s\[]+)\s+(--|->)\s+([^\s\[]+)\s*$")?;
         let node_regex = Regex::new(r"^\s*([^\s\[]+).*$")?;
@@ -666,17 +846,14 @@ impl KnowledgeGraph<String> {
 
             if end_regex.is_match(line) {
                 break;
-            }
-            else if let Some(edge_captures) = edge_regex.captures(line) {
+            } else if let Some(edge_captures) = edge_regex.captures(line) {
                 let from = edge_captures.get(1).unwrap().as_str().to_string();
                 let to = edge_captures.get(3).unwrap().as_str().to_string();
                 graph.add_edge(from, to);
-            }
-            else if let Some(node_captures) = node_regex.captures(line) {
+            } else if let Some(node_captures) = node_regex.captures(line) {
                 let node = node_captures.get(1).unwrap().as_str().to_string();
                 graph.add_vertex(node);
-            }
-            else {
+            } else {
                 panic!("Unrecognized pattern: {}", line);
             }
         }
@@ -685,15 +862,65 @@ impl KnowledgeGraph<String> {
     }
 
     pub fn from_wikidata<P>(path: P, relationship: &str) -> Result<Self, Box<dyn Error>>
-    where 
-        P: AsRef<Path>
+    where
+        P: AsRef<Path>,
     {
         // Get a buffered file reader
         let file = File::open(path)?;
         let reader = BufReader::new(file);
+        Self::from_wikidata_reader(reader, relationship, None)
+    }
+
+    /// Constructs a `KnowledgeGraph` from a bzip2-compressed Wikidata dump.
+    ///
+    /// The compressed stream is decompressed lazily, so the entire file is never
+    /// held in memory at once.
+    pub fn from_wikidata_bz2<P>(path: P, relationship: &str) -> Result<Self, Box<dyn Error>>
+    where
+        P: AsRef<Path>,
+    {
+        let file = File::open(path)?;
+        let decoder = bzip2::read::BzDecoder::new(file);
+        let reader = BufReader::new(decoder);
+        Self::from_wikidata_reader(reader, relationship, None)
+    }
+
+    /// Like `from_wikidata_bz2`, but stops after reading at most `limit`
+    /// entities, so callers can cheaply sample the head of a large dump.
+    pub fn from_wikidata_bz2_limited<P>(
+        path: P,
+        relationship: &str,
+        limit: usize,
+    ) -> Result<Self, Box<dyn Error>>
+    where
+        P: AsRef<Path>,
+    {
+        let file = File::open(path)?;
+        let decoder = bzip2::read::BzDecoder::new(file);
+        let reader = BufReader::new(decoder);
+        Self::from_wikidata_reader(reader, relationship, Some(limit))
+    }
+
+    /// Shared parsing logic for Wikidata dumps, operating over any buffered
+    /// reader (whether it wraps a plain file or a decompression stream).
+    ///
+    /// `limit` caps the number of entities read; `None` reads the entire dump.
+    fn from_wikidata_reader<R>(
+        reader: R,
+        relationship: &str,
+        limit: Option<usize>,
+    ) -> Result<Self, Box<dyn Error>>
+    where
+        R: BufRead + Send,
+    {
+        // A `None` limit means "read everything"; `usize::MAX` is effectively
+        // unbounded for any real dump.
+        let limit = limit.unwrap_or(usize::MAX);
 
         // Read graph in parallel
-        let graph: KnowledgeGraph<String> = reader.lines()
+        let graph: KnowledgeGraph<String> = reader
+            .lines()
+            .take(limit)
             .par_bridge()
             .filter_map(|line_result| line_result.ok())
             .filter_map(|line| {
@@ -710,15 +937,14 @@ impl KnowledgeGraph<String> {
                     .get(relationship)?
                     .as_array()?
                     .iter()
-                    .filter_map(|v|
-                        v
-                            .get("mainsnak")?
+                    .filter_map(|v| {
+                        v.get("mainsnak")?
                             .get("datavalue")?
                             .get("value")?
                             .get("id")?
                             .as_str()
                             .map(|s| s.to_string())
-                    )
+                    })
                     .collect();
 
                 let name = json_object
@@ -732,12 +958,11 @@ impl KnowledgeGraph<String> {
             })
             .map(|(name, src, dsts)| {
                 let src_clone = src.clone();
-                dsts
-                    .into_iter()
+                dsts.into_iter()
                     .map(move |dst| GraphElement::Edge((src.clone(), dst)))
-                    .chain(name
-                        .map(|n| vec![GraphElement::Rename((src_clone, n))])
-                        .unwrap_or(vec![])
+                    .chain(
+                        name.map(|n| vec![GraphElement::Rename((src_clone, n))])
+                            .unwrap_or(vec![]),
                     )
             })
             .flatten_iter()
@@ -749,7 +974,7 @@ impl KnowledgeGraph<String> {
 
 impl<V: Ord> FromIterator<(V, V)> for KnowledgeGraph<V> {
     /// Constructs a `KnowledgeGraph<V>` from an iterator of tuples representing
-    /// edges in the form `(V, V)`, where the first `V` represents the source 
+    /// edges in the form `(V, V)`, where the first `V` represents the source
     /// vertex of the edge, and the second represents the destination.
     fn from_iter<T: IntoIterator<Item = (V, V)>>(iter: T) -> Self {
         let mut graph = Self::new();
@@ -763,19 +988,23 @@ impl<V: Ord> FromIterator<(V, V)> for KnowledgeGraph<V> {
 
 enum GraphElement<V> {
     Edge((V, V)),
-    Rename((V, V))
+    Rename((V, V)),
 }
 
 impl<V: Ord + Send> FromParallelIterator<GraphElement<V>> for KnowledgeGraph<V> {
     fn from_par_iter<I>(par_iter: I) -> Self
     where
-        I: IntoParallelIterator<Item = GraphElement<V>>
+        I: IntoParallelIterator<Item = GraphElement<V>>,
     {
         let graph_mutex = Mutex::new(Self::new());
         let rename_mutex = Mutex::new(BTreeMap::new());
 
-        par_iter.into_par_iter()
-            .fold(Vec::new, |mut cache, edge| { cache.push(edge); cache })
+        par_iter
+            .into_par_iter()
+            .fold(Vec::new, |mut cache, edge| {
+                cache.push(edge);
+                cache
+            })
             .for_each(|cache| {
                 let mut graph = graph_mutex.lock().unwrap();
                 let mut rename = rename_mutex.lock().unwrap();
@@ -804,12 +1033,8 @@ impl<V: Ord> From<&KnowledgeGraph<V>> for KnowledgeGraph<usize> {
     fn from(value: &KnowledgeGraph<V>) -> Self {
         Self {
             edges: value.edges.clone(),
-            vertex_mapping: value.vertex_mapping
-                .values()
-                .cloned()
-                .enumerate()
-                .collect(),
-            clusters: Vec::new()
+            vertex_mapping: value.vertex_mapping.values().cloned().enumerate().collect(),
+            clusters: Vec::new(),
         }
     }
 }
@@ -818,11 +1043,12 @@ impl<V: Ord + Display> From<&KnowledgeGraph<V>> for KnowledgeGraph<String> {
     fn from(value: &KnowledgeGraph<V>) -> Self {
         Self {
             edges: value.edges.clone(),
-            vertex_mapping: value.vertex_mapping
+            vertex_mapping: value
+                .vertex_mapping
                 .iter()
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect(),
-            clusters: Vec::new()
+            clusters: Vec::new(),
         }
     }
 }
@@ -876,10 +1102,7 @@ mod tests {
 
     #[test]
     fn three_vertices_tree() {
-        let g: KnowledgeGraph<_> = [
-            ("v1", "v2"),
-            ("v1", "v3")
-        ].into_iter().collect();
+        let g: KnowledgeGraph<_> = [("v1", "v2"), ("v1", "v3")].into_iter().collect();
 
         assert_eq!(g.edges.len(), 2);
         assert_eq!(g.vertex_mapping.len(), 3);
@@ -889,21 +1112,14 @@ mod tests {
 
     #[test]
     fn rename_vertices() {
-        let mut g: KnowledgeGraph<_> = [
-            ("v1", "v2"),
-            ("v1", "v3")
-        ].into_iter().collect();
+        let mut g: KnowledgeGraph<_> = [("v1", "v2"), ("v1", "v3")].into_iter().collect();
 
         assert_eq!(g.edges.len(), 2);
         assert_eq!(g.vertex_mapping.len(), 3);
         assert_eq!(g.edges[0], (0, 1));
         assert_eq!(g.edges[1], (0, 2));
-        
-        let remapping = [
-            (0, 1),
-            (1, 2),
-            (2, 0)
-        ].into_iter().collect();
+
+        let remapping = [(0, 1), (1, 2), (2, 0)].into_iter().collect();
         g.remap_vertices(&remapping);
 
         assert_eq!(g.get_vertex_id(&"v1"), Some(1));
@@ -917,10 +1133,7 @@ mod tests {
 
     #[test]
     fn dot_file_writing() {
-        let g: KnowledgeGraph<_> = [
-            ("v1", "v2"),
-            ("v1", "v3")
-        ].into_iter().collect();
+        let g: KnowledgeGraph<_> = [("v1", "v2"), ("v1", "v3")].into_iter().collect();
 
         // Write graph to temporary dot file
         let temp_dir = tempdir().unwrap();
@@ -938,8 +1151,10 @@ mod tests {
     fn dot_file_reading() {
         let g1: KnowledgeGraph<String> = [
             ("v1".to_string(), "v2".to_string()),
-            ("v1".to_string(), "v3".to_string())
-        ].into_iter().collect();
+            ("v1".to_string(), "v3".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let g2 = KnowledgeGraph::from_dot_file("tests/goldens/test.dot").unwrap();
 
         assert_eq!(g1, g2);
@@ -947,36 +1162,189 @@ mod tests {
 
     #[test]
     fn adj_mat_small() {
-        let g: KnowledgeGraph<_> = [
-            ("v1", "v2"),
-            ("v1", "v3")
-        ].into_iter().collect();
+        let g: KnowledgeGraph<_> = [("v1", "v2"), ("v1", "v3")].into_iter().collect();
 
-        let adj_mat = vec![
-            vec![0, 1, 1],
-            vec![0, 0, 0],
-            vec![0, 0, 0]
-        ];
+        let adj_mat = vec![vec![0, 1, 1], vec![0, 0, 0], vec![0, 0, 0]];
         assert_eq!(adj_mat, g.as_matrix());
     }
 
     #[test]
     fn adj_mat_large() {
-        let mut g: KnowledgeGraph<_> = [
-            (0, 1),
-            (1, 0),
-            (0, 2),
-            (3, 1)
-        ].into_iter().collect();
+        let mut g: KnowledgeGraph<_> = [(0, 1), (1, 0), (0, 2), (3, 1)].into_iter().collect();
         for i in 3..2000 {
             g.add_vertex(i);
         }
 
-        let mut adj_mat = vec![vec![0;1000];1000];
+        let mut adj_mat = vec![vec![0; 1000]; 1000];
         adj_mat[0][0] = 2;
         adj_mat[0][1] = 1;
         adj_mat[1][0] = 1;
 
         assert_eq!(adj_mat, g.as_matrix());
+    }
+
+    /// A single `cluster_step` on a small path graph yields exact, reproducible
+    /// weights. This locks in the numerical behavior of the optimized
+    /// `cluster_step_table` implementation (the `exp`-lookup-table equivalence).
+    #[test]
+    fn cluster_step_weight_exact() {
+        // Directed path 0 -> 1 -> 2. The algorithm treats edges as contributing
+        // to both endpoints, so effectively an undirected path.
+        let mut g: KnowledgeGraph<_> = [(0, 1), (1, 2)].into_iter().collect();
+
+        let factor = 0.01;
+        let weights = g.cluster_step(factor, &(0..3));
+
+        assert_eq!(weights.len(), 3);
+
+        // Computed by hand from the algorithm:
+        //   weights[0] += exp_table[1]
+        //   weights[1] += exp_table[0] + exp_table[2]
+        //   weights[2] += exp_table[1]
+        // where exp_table[k] = exp(-factor * k). The returned vector is sorted
+        // descending, so the middle node (index 1, degree 2) is first, and the
+        // two symmetric endpoints (equal weight) follow.
+        let top = 1.0 + (-2.0 * factor).exp();
+        let bot = (-1.0 * factor).exp();
+
+        assert_eq!(weights[0], top);
+        assert_eq!(weights[1], bot);
+        assert_eq!(weights[2], bot);
+    }
+
+    /// `cluster_step` must be deterministic: two calls on equivalent graphs
+    /// produce identical weight vectors.
+    #[test]
+    fn cluster_step_deterministic() {
+        let build = || -> KnowledgeGraph<usize> { [(0, 1), (1, 2), (2, 3)].into_iter().collect() };
+
+        let mut g1 = build();
+        let mut g2 = build();
+
+        let w1 = g1.cluster_step(0.05, &(0..4));
+        let w2 = g2.cluster_step(0.05, &(0..4));
+
+        assert_eq!(w1, w2);
+    }
+
+    /// Helper: assert that a sequence of clusters partitions the full vertex
+    /// set 0..n with no gaps and no overlaps.
+    fn assert_valid_partition(clusters: &[Vec<usize>], n: usize) {
+        let mut seen = vec![false; n];
+        let mut count = 0;
+        for cluster in clusters {
+            assert!(!cluster.is_empty(), "clusters must be non-empty");
+            for &v in cluster {
+                assert!(v < n, "vertex id {} out of range", v);
+                assert!(!seen[v], "vertex {} appears in more than one cluster", v);
+                seen[v] = true;
+                count += 1;
+            }
+        }
+        assert_eq!(count, n, "partition must cover all {} vertices", n);
+    }
+
+    /// `cluster` must terminate and produce a valid partition of the vertex
+    /// set even on randomized planted-partition graphs. This is a smoke test
+    /// against infinite recursion, overlap, or dropped vertices.
+    #[test]
+    fn cluster_partition_valid() {
+        use crate::graph_builder::GraphBuilder;
+
+        for seed in 0..5u64 {
+            let mut builder = GraphBuilder::new(seed);
+            for _ in 0..5 {
+                builder.add_scale_free_cluster(20, 3).unwrap();
+            }
+            for i in 0..5 {
+                builder.add_random_link(i, (i + 1) % 5).unwrap();
+            }
+
+            let mut graph = builder.finalize_graph();
+            let n = graph.num_vertices();
+            graph.cluster(0.01, 3, 0.1, 5);
+
+            assert_valid_partition(&graph.get_clusters(), n);
+        }
+    }
+
+    /// `cluster` must be deterministic: identical inputs produce identical
+    /// cluster assignments (same vertex ids grouped the same way).
+    #[test]
+    fn cluster_deterministic() {
+        use crate::graph_builder::GraphBuilder;
+
+        let build = |seed: u64| {
+            let mut builder = GraphBuilder::new(seed);
+            for _ in 0..4 {
+                builder.add_dense_cluster(6, 0.5).unwrap();
+            }
+            builder.add_random_link(0, 1).unwrap();
+            builder.add_random_link(2, 3).unwrap();
+            let mut graph = builder.finalize_graph();
+            graph.cluster(0.01, 3, 0.1, 3);
+            graph
+        };
+
+        let g1 = build(42);
+        let g2 = build(42);
+
+        assert_eq!(g1.get_clusters(), g2.get_clusters());
+    }
+
+    /// `cluster` must recover the *correct* vertex labels, not merely a valid
+    /// partition. Two disconnected cliques of very different sizes have
+    /// unambiguously different weight distributions, so the algorithm must
+    /// separate them, and `get_clusters()` must group the original node labels
+    /// (clique 0 = nodes 0..3, clique 1 = nodes 4..15) correctly.
+    ///
+    /// This guards against label-scrambling regressions (e.g. a `vertex_mapping`
+    /// that falls out of sync with `self.edges`), which a partition-validity
+    /// check alone would not detect.
+    #[test]
+    fn cluster_recover_ground_truth() {
+        use crate::graph_builder::GraphBuilder;
+        use std::collections::HashSet;
+
+        let mut builder = GraphBuilder::new(0);
+        builder.add_dense_cluster(4, 1.0).unwrap(); // original node labels 0..3
+        builder.add_dense_cluster(12, 1.0).unwrap(); // original node labels 4..15
+
+        let mut graph = builder.finalize_graph();
+        graph.shuffle_vertex_ids(0);
+        graph.cluster(0.01, 3, 0.1, 2);
+
+        let mut clusters: Vec<HashSet<usize>> = graph
+            .get_clusters()
+            .into_iter()
+            .map(|c| c.into_iter().collect())
+            .collect();
+
+        let mut expected: Vec<HashSet<usize>> = vec![(0..4).collect(), (4..16).collect()];
+
+        // Order of clusters is arbitrary, so sort by smallest element.
+        clusters.sort_by_key(|s| *s.iter().min().unwrap());
+        expected.sort_by_key(|s| *s.iter().min().unwrap());
+
+        assert_eq!(clusters, expected);
+    }
+
+    /// Reads just the head of the full bzip2-compressed Wikidata dump and checks
+    /// that streaming decompression produces a non-empty graph for the
+    /// "instance of" (P31) relationship. Capping the read keeps this fast enough
+    /// to run as part of the normal test suite. Skipped when the dump is absent.
+    #[test]
+    fn from_wikidata_bz2() {
+        let path = "../data/wikidata/latest-all.json.bz2";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipping: {} not found", path);
+            return;
+        }
+
+        let g = KnowledgeGraph::from_wikidata_bz2_limited(path, "P31", 500)
+            .expect("failed to parse bz2-compressed Wikidata dump");
+
+        assert!(g.num_vertices() > 0, "expected at least one vertex");
+        assert!(g.num_edges() > 0, "expected at least one edge");
     }
 }
